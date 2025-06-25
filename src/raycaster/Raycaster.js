@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { Ray } from './Ray.js';
 import { Hit } from './Hit.js';
-import { SplatRenderMode } from '../SplatRenderMode.js';
 
 export class Raycaster {
 
@@ -107,29 +106,17 @@ export class Raycaster {
             }
             if (node.data && node.data.indexes && node.data.indexes.length > 0) {
                 for (let i = 0; i < node.data.indexes.length; i++) {
-
                     const splatGlobalIndex = node.data.indexes[i];
-                    const splatSceneIndex = splatTree.splatMesh.getSceneIndexForSplat(splatGlobalIndex);
-                    const splatScene = splatTree.splatMesh.getScene(splatSceneIndex);
-                    if (!splatScene.visible) continue;
-
                     splatTree.splatMesh.getSplatColor(splatGlobalIndex, tempColor);
                     splatTree.splatMesh.getSplatCenter(splatGlobalIndex, tempCenter);
                     splatTree.splatMesh.getSplatScaleAndRotation(splatGlobalIndex, tempScale, tempRotation);
 
-                    if (tempScale.x <= scaleEpsilon || tempScale.y <= scaleEpsilon ||
-                        splatTree.splatMesh.splatRenderMode === SplatRenderMode.ThreeD && tempScale.z <= scaleEpsilon) {
+                    if (tempScale.x <= scaleEpsilon || tempScale.y <= scaleEpsilon || tempScale.z <= scaleEpsilon) {
                         continue;
                     }
 
                     if (!this.raycastAgainstTrueSplatEllipsoid) {
-                        let radius = (tempScale.x + tempScale.y);
-                        let componentCount = 2;
-                        if (splatTree.splatMesh.splatRenderMode === SplatRenderMode.ThreeD) {
-                            radius += tempScale.z;
-                            componentCount = 3;
-                        }
-                        radius = radius / componentCount;
+                        const radius = (tempScale.x + tempScale.y + tempScale.z) / 3;
                         if (ray.intersectSphere(tempCenter, radius, tempHit)) {
                             const hitClone = tempHit.clone();
                             hitClone.splatIndex = splatGlobalIndex;

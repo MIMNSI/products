@@ -13,15 +13,12 @@ export class AbortablePromise {
 
     constructor(promiseFunc, abortHandler) {
 
-        let resolver;
-        let rejecter;
+        let promiseResolve;
+        let promiseReject;
         this.promise = new Promise((resolve, reject) => {
-            resolver = resolve;
-            rejecter = reject;
+            promiseResolve = resolve.bind(this);
+            promiseReject = reject.bind(this);
         });
-
-        const promiseResolve = resolver.bind(this);
-        const promiseReject = rejecter.bind(this);
 
         const resolve = (...args) => {
             promiseResolve(...args);
@@ -64,8 +61,8 @@ export class AbortablePromise {
         }, this.abortHandler);
     }
 
-    abort(reason) {
-        if (this.abortHandler) this.abortHandler(reason);
+    abort() {
+        if (this.abortHandler) this.abortHandler();
     }
 
 }

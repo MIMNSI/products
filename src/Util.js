@@ -54,38 +54,22 @@ export const rgbaArrayToInteger = function(arr, offset) {
     return arr[offset] + (arr[offset + 1] << 8) + (arr[offset + 2] << 16) + (arr[offset + 3] << 24);
 };
 
-export const fetchWithProgress = function(path, onProgress, saveChunks = true, headers) {
+export const fetchWithProgress = function(path, onProgress, saveChunks = true) {
 
     const abortController = new AbortController();
     const signal = abortController.signal;
     let aborted = false;
-    const abortHandler = (reason) => {
-        abortController.abort(reason);
+    let rejectFunc = null;
+    const abortHandler = () => {
+        abortController.abort();
+        rejectFunc(new AbortedPromiseError('Fetch aborted.'));
         aborted = true;
     };
 
-    let onProgressCalledAtComplete = false;
-    const localOnProgress = (percent, percentLabel, chunk, fileSize) => {
-        if (onProgress && !onProgressCalledAtComplete) {
-            onProgress(percent, percentLabel, chunk, fileSize);
-            if (percent === 100) {
-                onProgressCalledAtComplete = true;
-            }
-        }
-    };
-
     return new AbortablePromise((resolve, reject) => {
-        const fetchOptions = { signal };
-        if (headers) fetchOptions.headers = headers;
-         fetch(path, fetchOptions)
+        rejectFunc = reject;
+        fetch(path, { signal })
         .then(async (data) => {
-            // Handle error conditions where data is still returned
-            if (!data.ok) {
-                const errorText = await data.text();
-                reject(new Error(`Fetch failed: ${data.status} ${data.statusText} ${errorText}`));
-                return;
-            }
-
             const reader = data.body.getReader();
             let bytesDownloaded = 0;
             let _fileSize = data.headers.get('Content-Length');
@@ -97,7 +81,9 @@ export const fetchWithProgress = function(path, onProgress, saveChunks = true, h
                 try {
                     const { value: chunk, done } = await reader.read();
                     if (done) {
-                        localOnProgress(100, '100%', chunk, fileSize);
+                        if (onProgress) {
+                            onProgress(100, '100%', chunk, fileSize);
+                        }
                         if (saveChunks) {
                             const buffer = new Blob(chunks).arrayBuffer();
                             resolve(buffer);
@@ -113,18 +99,16 @@ export const fetchWithProgress = function(path, onProgress, saveChunks = true, h
                         percent = bytesDownloaded / fileSize * 100;
                         percentLabel = `${percent.toFixed(2)}%`;
                     }
-                    if (saveChunks) {
-                        chunks.push(chunk);
+                    if (saveChunks) chunks.push(chunk);
+                    if (onProgress) {
+                        const cancelSaveChucnks = onProgress(percent, percentLabel, chunk, fileSize);
+                        if (cancelSaveChucnks) saveChunks = false;
                     }
-                    localOnProgress(percent, percentLabel, chunk, fileSize);
                 } catch (error) {
                     reject(error);
-                    return;
+                    break;
                 }
             }
-        })
-        .catch((error) => {
-            reject(new AbortedPromiseError(error));
         });
     }, abortHandler);
 
@@ -157,83 +141,18 @@ export const disposeAllMeshes = (object3D) => {
 export const delayedExecute = (func, fast) => {
     return new Promise((resolve) => {
         window.setTimeout(() => {
-            resolve(func ? func() : undefined);
+            resolve(func());
         }, fast ? 1 : 50);
     });
 };
 
 
 export const getSphericalHarmonicsComponentCountForDegree = (sphericalHarmonicsDegree = 0) => {
-    let shCoeffPerSplat = 0;
-    if (sphericalHarmonicsDegree === 1) {
-        shCoeffPerSplat = 9;
-    } else if (sphericalHarmonicsDegree === 2) {
-        shCoeffPerSplat = 24;
-    } else if (sphericalHarmonicsDegree === 3) {
-        shCoeffPerSplat = 45;
-    } else if (sphericalHarmonicsDegree > 3) {
-        throw new Error('getSphericalHarmonicsComponentCountForDegree() -> Invalid spherical harmonics degree');
+    switch (sphericalHarmonicsDegree) {
+        case 1:
+            return 9;
+        case 2:
+            return 24;
     }
-    return shCoeffPerSplat;
+    return 0;
 };
-
-export const nativePromiseWithExtractedComponents = () => {
-    let resolver;
-    let rejecter;
-    const promise = new Promise((resolve, reject) => {
-        resolver = resolve;
-        rejecter = reject;
-    });
-    return {
-        'promise': promise,
-        'resolve': resolver,
-        'reject': rejecter
-    };
-};
-
-export const abortablePromiseWithExtractedComponents = (abortHandler) => {
-    let resolver;
-    let rejecter;
-    if (!abortHandler) {
-        abortHandler = () => {};
-    }
-    const promise = new AbortablePromise((resolve, reject) => {
-        resolver = resolve;
-        rejecter = reject;
-    }, abortHandler);
-    return {
-        'promise': promise,
-        'resolve': resolver,
-        'reject': rejecter
-    };
-};
-
-class Semver {
-    constructor(major, minor, patch) {
-        this.major = major;
-        this.minor = minor;
-        this.patch = patch;
-    }
-
-    toString() {
-        return `${this.major}_${this.minor}_${this.patch}`;
-    }
-}
-
-export function isIOS() {
-    const ua = navigator.userAgent;
-    return ua.indexOf('iPhone') > 0 || ua.indexOf('iPad') > 0;
-}
-
-export function getIOSSemever() {
-    if (isIOS()) {
-        const extract = navigator.userAgent.match(/OS (\d+)_(\d+)_?(\d+)?/);
-        return new Semver(
-            parseInt(extract[1] || 0, 10),
-            parseInt(extract[2] || 0, 10),
-            parseInt(extract[3] || 0, 10)
-        );
-    } else {
-        return null; // or [0,0,0]
-    }
-}
