@@ -38,15 +38,12 @@
 
         constructor(promiseFunc, abortHandler) {
 
-            let resolver;
-            let rejecter;
+            let promiseResolve;
+            let promiseReject;
             this.promise = new Promise((resolve, reject) => {
-                resolver = resolve;
-                rejecter = reject;
+                promiseResolve = resolve.bind(this);
+                promiseReject = reject.bind(this);
             });
-
-            const promiseResolve = resolver.bind(this);
-            const promiseReject = rejecter.bind(this);
 
             const resolve = (...args) => {
                 promiseResolve(...args);
@@ -89,8 +86,8 @@
             }, this.abortHandler);
         }
 
-        abort(reason) {
-            if (this.abortHandler) this.abortHandler(reason);
+        abort() {
+            if (this.abortHandler) this.abortHandler();
         }
 
     }
@@ -157,38 +154,22 @@
         return arr[offset] + (arr[offset + 1] << 8) + (arr[offset + 2] << 16) + (arr[offset + 3] << 24);
     };
 
-    const fetchWithProgress = function(path, onProgress, saveChunks = true, headers) {
+    const fetchWithProgress = function(path, onProgress, saveChunks = true) {
 
         const abortController = new AbortController();
         const signal = abortController.signal;
         let aborted = false;
-        const abortHandler = (reason) => {
-            abortController.abort(reason);
+        let rejectFunc = null;
+        const abortHandler = () => {
+            abortController.abort();
+            rejectFunc(new AbortedPromiseError('Fetch aborted.'));
             aborted = true;
         };
 
-        let onProgressCalledAtComplete = false;
-        const localOnProgress = (percent, percentLabel, chunk, fileSize) => {
-            if (onProgress && !onProgressCalledAtComplete) {
-                onProgress(percent, percentLabel, chunk, fileSize);
-                if (percent === 100) {
-                    onProgressCalledAtComplete = true;
-                }
-            }
-        };
-
         return new AbortablePromise((resolve, reject) => {
-            const fetchOptions = { signal };
-            if (headers) fetchOptions.headers = headers;
-             fetch(path, fetchOptions)
+            rejectFunc = reject;
+            fetch(path, { signal })
             .then(async (data) => {
-                // Handle error conditions where data is still returned
-                if (!data.ok) {
-                    const errorText = await data.text();
-                    reject(new Error(`Fetch failed: ${data.status} ${data.statusText} ${errorText}`));
-                    return;
-                }
-
                 const reader = data.body.getReader();
                 let bytesDownloaded = 0;
                 let _fileSize = data.headers.get('Content-Length');
@@ -200,7 +181,9 @@
                     try {
                         const { value: chunk, done } = await reader.read();
                         if (done) {
-                            localOnProgress(100, '100%', chunk, fileSize);
+                            if (onProgress) {
+                                onProgress(100, '100%', chunk, fileSize);
+                            }
                             if (saveChunks) {
                                 const buffer = new Blob(chunks).arrayBuffer();
                                 resolve(buffer);
@@ -216,18 +199,16 @@
                             percent = bytesDownloaded / fileSize * 100;
                             percentLabel = `${percent.toFixed(2)}%`;
                         }
-                        if (saveChunks) {
-                            chunks.push(chunk);
+                        if (saveChunks) chunks.push(chunk);
+                        if (onProgress) {
+                            const cancelSaveChucnks = onProgress(percent, percentLabel, chunk, fileSize);
+                            if (cancelSaveChucnks) saveChunks = false;
                         }
-                        localOnProgress(percent, percentLabel, chunk, fileSize);
                     } catch (error) {
                         reject(error);
-                        return;
+                        break;
                     }
                 }
-            })
-            .catch((error) => {
-                reject(new AbortedPromiseError(error));
             });
         }, abortHandler);
 
@@ -260,86 +241,21 @@
     const delayedExecute = (func, fast) => {
         return new Promise((resolve) => {
             window.setTimeout(() => {
-                resolve(func ? func() : undefined);
+                resolve(func());
             }, fast ? 1 : 50);
         });
     };
 
 
     const getSphericalHarmonicsComponentCountForDegree = (sphericalHarmonicsDegree = 0) => {
-        let shCoeffPerSplat = 0;
-        if (sphericalHarmonicsDegree === 1) {
-            shCoeffPerSplat = 9;
-        } else if (sphericalHarmonicsDegree === 2) {
-            shCoeffPerSplat = 24;
-        } else if (sphericalHarmonicsDegree === 3) {
-            shCoeffPerSplat = 45;
-        } else if (sphericalHarmonicsDegree > 3) {
-            throw new Error('getSphericalHarmonicsComponentCountForDegree() -> Invalid spherical harmonics degree');
+        switch (sphericalHarmonicsDegree) {
+            case 1:
+                return 9;
+            case 2:
+                return 24;
         }
-        return shCoeffPerSplat;
+        return 0;
     };
-
-    const nativePromiseWithExtractedComponents = () => {
-        let resolver;
-        let rejecter;
-        const promise = new Promise((resolve, reject) => {
-            resolver = resolve;
-            rejecter = reject;
-        });
-        return {
-            'promise': promise,
-            'resolve': resolver,
-            'reject': rejecter
-        };
-    };
-
-    const abortablePromiseWithExtractedComponents = (abortHandler) => {
-        let resolver;
-        let rejecter;
-        if (!abortHandler) {
-            abortHandler = () => {};
-        }
-        const promise = new AbortablePromise((resolve, reject) => {
-            resolver = resolve;
-            rejecter = reject;
-        }, abortHandler);
-        return {
-            'promise': promise,
-            'resolve': resolver,
-            'reject': rejecter
-        };
-    };
-
-    class Semver {
-        constructor(major, minor, patch) {
-            this.major = major;
-            this.minor = minor;
-            this.patch = patch;
-        }
-
-        toString() {
-            return `${this.major}_${this.minor}_${this.patch}`;
-        }
-    }
-
-    function isIOS() {
-        const ua = navigator.userAgent;
-        return ua.indexOf('iPhone') > 0 || ua.indexOf('iPad') > 0;
-    }
-
-    function getIOSSemever() {
-        if (isIOS()) {
-            const extract = navigator.userAgent.match(/OS (\d+)_(\d+)_?(\d+)?/);
-            return new Semver(
-                parseInt(extract[1] || 0, 10),
-                parseInt(extract[2] || 0, 10),
-                parseInt(extract[3] || 0, 10)
-            );
-        } else {
-            return null; // or [0,0,0]
-        }
-    }
 
     const BASE_COMPONENT_COUNT = 14;
 
@@ -383,7 +299,7 @@
             FRC20: 34,
             FRC21: 35,
             FRC22: 36,
-            FRC23: 37
+            FRC23: 37,
         };
 
         constructor(sphericalHarmonicsDegree = 0) {
@@ -438,49 +354,42 @@
 
     class Constants {
 
-        static DefaultSplatSortDistanceMapPrecision = 16;
+        static DepthMapRange = 1 << 16;
         static MemoryPageSize = 65536;
         static BytesPerFloat = 4;
         static BytesPerInt = 4;
         static MaxScenes = 32;
-        static ProgressiveLoadSectionSize = 262144;
-        static ProgressiveLoadSectionDelayDuration = 15;
+        static StreamingSectionSize = 524288;
         static SphericalHarmonics8BitCompressionRange = 3;
     }
 
-    const DefaultSphericalHarmonics8BitCompressionRange = Constants.SphericalHarmonics8BitCompressionRange;
-    const DefaultSphericalHarmonics8BitCompressionHalfRange = DefaultSphericalHarmonics8BitCompressionRange / 2.0;
+    const SphericalHarmonics8BitCompressionHalfRange = Constants.SphericalHarmonics8BitCompressionRange / 2.0;
 
     const toHalfFloat = THREE__namespace.DataUtils.toHalfFloat.bind(THREE__namespace.DataUtils);
-    const fromHalfFloat$1 = THREE__namespace.DataUtils.fromHalfFloat.bind(THREE__namespace.DataUtils);
 
-    const toUncompressedFloat = (f, compressionLevel, isSH = false, range8BitMin, range8BitMax) => {
+    const toUint8 = (v) => {
+        v = clamp(v, -SphericalHarmonics8BitCompressionHalfRange, SphericalHarmonics8BitCompressionHalfRange);
+        return clamp(Math.floor((v * (0.5 / SphericalHarmonics8BitCompressionHalfRange) + 0.5) * 255), 0, 255);
+    };
+
+    const fromUint8 = (v) => {
+        return (v / 255) * Constants.SphericalHarmonics8BitCompressionRange - SphericalHarmonics8BitCompressionHalfRange;
+    };
+
+    const fromHalfFloat = THREE__namespace.DataUtils.fromHalfFloat.bind(THREE__namespace.DataUtils);
+
+    const fromHalfFloatToUint8 = (v) => {
+        return toUint8(fromHalfFloat(v));
+    };
+
+    const toUncompressedFloat = (f, compressionLevel, isSH = false) => {
         if (compressionLevel === 0) {
             return f;
         } else if (compressionLevel === 1 || compressionLevel === 2 && !isSH) {
             return THREE__namespace.DataUtils.fromHalfFloat(f);
         } else if (compressionLevel === 2) {
-            return fromUint8(f, range8BitMin, range8BitMax);
+            return fromUint8(f);
         }
-    };
-
-    const toUint8 = (v, rangeMin, rangeMax) => {
-        v = clamp(v, rangeMin, rangeMax);
-        const range = (rangeMax - rangeMin);
-        return clamp(Math.floor((v - rangeMin) / range * 255), 0, 255);
-    };
-
-    const fromUint8 = (v, rangeMin, rangeMax) => {
-        const range = (rangeMax - rangeMin);
-        return (v / 255 * range + rangeMin);
-    };
-
-    const fromHalfFloatToUint8 = (v, rangeMin, rangeMax) => {
-        return toUint8(fromHalfFloat$1(v, rangeMin, rangeMax));
-    };
-
-    const fromUint8ToHalfFloat = (v, rangeMin, rangeMax) => {
-        return toHalfFloat(fromUint8(v, rangeMin, rangeMax));
     };
 
     const dataViewFloatForCompressionLevel = (dataView, floatIndex, compressionLevel, isSH = false) => {
@@ -490,46 +399,6 @@
             return dataView.getUint16(floatIndex * 2, true);
         } else {
             return dataView.getUint8(floatIndex, true);
-        }
-    };
-
-    const convertBetweenCompressionLevels = function() {
-
-        const noop = (v) => v;
-
-        return function(val, fromLevel, toLevel, isSH = false) {
-            if (fromLevel === toLevel) return val;
-            let outputConversionFunc = noop;
-
-            if (fromLevel === 2 && isSH) {
-                if (toLevel === 1) outputConversionFunc = fromUint8ToHalfFloat;
-                else if (toLevel == 0) {
-                    outputConversionFunc = fromUint8;
-                }
-            } else if (fromLevel === 2 || fromLevel === 1) {
-                if (toLevel === 0) outputConversionFunc = fromHalfFloat$1;
-                else if (toLevel == 2) {
-                    if (!isSH) outputConversionFunc = noop;
-                    else outputConversionFunc = fromHalfFloatToUint8;
-                }
-            } else if (fromLevel === 0) {
-                if (toLevel === 1) outputConversionFunc = toHalfFloat;
-                else if (toLevel == 2) {
-                    if (!isSH) outputConversionFunc = toHalfFloat;
-                    else outputConversionFunc = toUint8;
-                }
-            }
-
-            return outputConversionFunc(val);
-        };
-
-    }();
-
-    const copyBetweenBuffers = (srcBuffer, srcOffset, destBuffer, destOffset, byteCount = 0) => {
-        const src = new Uint8Array(srcBuffer, srcOffset);
-        const dest = new Uint8Array(destBuffer, destOffset);
-        for (let i = 0; i < byteCount; i++) {
-            dest[i] = src[i];
         }
     };
 
@@ -699,7 +568,7 @@
             const scale = new THREE__namespace.Vector3();
             const rotation = new THREE__namespace.Quaternion();
 
-            return function(index, outScale, outRotation, transform, scaleOverride) {
+            return function(index, outScale, outRotation, transform) {
                 const sectionIndex = this.globalSplatIndexToSectionMap[index];
                 const section = this.sections[sectionIndex];
                 const localSplatIndex = index - section.splatCountOffset;
@@ -712,11 +581,6 @@
                 scale.set(toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 0, this.compressionLevel), this.compressionLevel),
                           toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 1, this.compressionLevel), this.compressionLevel),
                           toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 2, this.compressionLevel), this.compressionLevel));
-                if (scaleOverride) {
-                    if (scaleOverride.x !== undefined) scale.x = scaleOverride.x;
-                    if (scaleOverride.y !== undefined) scale.y = scaleOverride.y;
-                    if (scaleOverride.z !== undefined) scale.z = scaleOverride.z;
-                }
 
                 rotation.set(toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 4, this.compressionLevel), this.compressionLevel),
                              toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 5, this.compressionLevel), this.compressionLevel),
@@ -791,97 +655,6 @@
             }
         }
 
-        fillSplatScaleRotationArray = function() {
-
-            const scaleMatrix = new THREE__namespace.Matrix4();
-            const rotationMatrix = new THREE__namespace.Matrix4();
-            const tempMatrix = new THREE__namespace.Matrix4();
-            const scale = new THREE__namespace.Vector3();
-            const rotation = new THREE__namespace.Quaternion();
-            const tempPosition = new THREE__namespace.Vector3();
-
-            const ensurePositiveW = (quaternion) => {
-                const flip = quaternion.w < 0 ? -1 : 1;
-                quaternion.x *= flip;
-                quaternion.y *= flip;
-                quaternion.z *= flip;
-                quaternion.w *= flip;
-            };
-
-            return function(outScaleArray, outRotationArray, transform, srcFrom, srcTo, destFrom,
-                            desiredOutputCompressionLevel, scaleOverride) {
-                const splatCount = this.splatCount;
-
-                srcFrom = srcFrom || 0;
-                srcTo = srcTo || splatCount - 1;
-                if (destFrom === undefined) destFrom = srcFrom;
-
-                const outputConversion = (value, srcCompressionLevel) => {
-                    if (srcCompressionLevel === undefined) srcCompressionLevel = this.compressionLevel;
-                    return convertBetweenCompressionLevels(value, srcCompressionLevel, desiredOutputCompressionLevel);
-                };
-
-                for (let i = srcFrom; i <= srcTo; i++) {
-                    const sectionIndex = this.globalSplatIndexToSectionMap[i];
-                    const section = this.sections[sectionIndex];
-                    const localSplatIndex = i - section.splatCountOffset;
-
-                    const srcSplatScalesBase = section.bytesPerSplat * localSplatIndex +
-                                            SplatBuffer.CompressionLevels[this.compressionLevel].ScaleOffsetBytes;
-
-                    const scaleDestBase = (i - srcFrom + destFrom) * SplatBuffer.ScaleComponentCount;
-                    const rotationDestBase = (i - srcFrom + destFrom) * SplatBuffer.RotationComponentCount;
-                    const dataView = new DataView(this.bufferData, section.dataBase + srcSplatScalesBase);
-
-                    const srcScaleX = (scaleOverride && scaleOverride.x !== undefined) ? scaleOverride.x :
-                                       dataViewFloatForCompressionLevel(dataView, 0, this.compressionLevel);
-                    const srcScaleY = (scaleOverride && scaleOverride.y !== undefined) ? scaleOverride.y :
-                                       dataViewFloatForCompressionLevel(dataView, 1, this.compressionLevel);
-                    const srcScaleZ = (scaleOverride && scaleOverride.z !== undefined) ? scaleOverride.z :
-                                       dataViewFloatForCompressionLevel(dataView, 2, this.compressionLevel);
-
-                    const srcRotationW = dataViewFloatForCompressionLevel(dataView, 3, this.compressionLevel);
-                    const srcRotationX = dataViewFloatForCompressionLevel(dataView, 4, this.compressionLevel);
-                    const srcRotationY = dataViewFloatForCompressionLevel(dataView, 5, this.compressionLevel);
-                    const srcRotationZ = dataViewFloatForCompressionLevel(dataView, 6, this.compressionLevel);
-
-                    scale.set(toUncompressedFloat(srcScaleX, this.compressionLevel),
-                              toUncompressedFloat(srcScaleY, this.compressionLevel),
-                              toUncompressedFloat(srcScaleZ, this.compressionLevel));
-
-                    rotation.set(toUncompressedFloat(srcRotationX, this.compressionLevel),
-                                 toUncompressedFloat(srcRotationY, this.compressionLevel),
-                                 toUncompressedFloat(srcRotationZ, this.compressionLevel),
-                                 toUncompressedFloat(srcRotationW, this.compressionLevel)).normalize();
-
-                    if (transform) {
-                        tempPosition.set(0, 0, 0);
-                        scaleMatrix.makeScale(scale.x, scale.y, scale.z);
-                        rotationMatrix.makeRotationFromQuaternion(rotation);
-                        tempMatrix.identity().premultiply(scaleMatrix).premultiply(rotationMatrix);
-                        tempMatrix.premultiply(transform);
-                        tempMatrix.decompose(tempPosition, rotation, scale);
-                        rotation.normalize();
-                    }
-
-                    ensurePositiveW(rotation);
-
-                    if (outScaleArray) {
-                        outScaleArray[scaleDestBase] = outputConversion(scale.x, 0);
-                        outScaleArray[scaleDestBase + 1] = outputConversion(scale.y, 0);
-                        outScaleArray[scaleDestBase + 2] = outputConversion(scale.z, 0);
-                    }
-
-                    if (outRotationArray) {
-                        outRotationArray[rotationDestBase] = outputConversion(rotation.x, 0);
-                        outRotationArray[rotationDestBase + 1] = outputConversion(rotation.y, 0);
-                        outRotationArray[rotationDestBase + 2] = outputConversion(rotation.z, 0);
-                        outRotationArray[rotationDestBase + 3] = outputConversion(rotation.w, 0);
-                    }
-                }
-            };
-        }();
-
         static computeCovariance = function() {
 
             const tempMatrix4 = new THREE__namespace.Matrix4();
@@ -954,7 +727,6 @@
                 scale.set(toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 0, this.compressionLevel), this.compressionLevel),
                           toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 1, this.compressionLevel), this.compressionLevel),
                           toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 2, this.compressionLevel), this.compressionLevel));
-
                 rotation.set(toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 4, this.compressionLevel), this.compressionLevel),
                              toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 5, this.compressionLevel), this.compressionLevel),
                              toUncompressedFloat(dataViewFloatForCompressionLevel(dataView, 6, this.compressionLevel), this.compressionLevel),
@@ -1001,11 +773,6 @@
             }
 
             const tempMatrix3 = new THREE__namespace.Matrix3();
-            const tempMatrix4 = new THREE__namespace.Matrix4();
-
-            const tempTranslation = new THREE__namespace.Vector3();
-            const tempScale = new THREE__namespace.Vector3();
-            const tempRotation = new THREE__namespace.Quaternion();
 
             const sh11 = [];
             const sh12 = [];
@@ -1055,10 +822,10 @@
                 destArray[destBase + 2] = conversionFunc(srcArray[2]);
             };
 
-            const toUncompressedFloatArray3 = (src, dest, compressionLevel, range8BitMin, range8BitMax) => {
-                dest[0] = toUncompressedFloat(src[0], compressionLevel, true, range8BitMin, range8BitMax);
-                dest[1] = toUncompressedFloat(src[1], compressionLevel, true, range8BitMin, range8BitMax);
-                dest[2] = toUncompressedFloat(src[2], compressionLevel, true, range8BitMin, range8BitMax);
+            const toUncompressedFloatArray3 = (src, dest, compressionLevel) => {
+                dest[0] = toUncompressedFloat(src[0], compressionLevel, true);
+                dest[1] = toUncompressedFloat(src[1], compressionLevel, true);
+                dest[2] = toUncompressedFloat(src[2], compressionLevel, true);
                 return dest;
             };
 
@@ -1071,23 +838,11 @@
                 if (destFrom === undefined) destFrom = srcFrom;
 
                 if (transform && outSphericalHarmonicsDegree >= 1) {
-                    tempMatrix4.copy(transform);
-                    tempMatrix4.decompose(tempTranslation, tempRotation, tempScale);
-                    tempRotation.normalize();
-                    tempMatrix4.makeRotationFromQuaternion(tempRotation);
-                    tempMatrix3.setFromMatrix4(tempMatrix4);
+                    tempMatrix3.setFromMatrix4(transform);
                     set3(sh11, tempMatrix3.elements[4], -tempMatrix3.elements[7], tempMatrix3.elements[1]);
                     set3(sh12, -tempMatrix3.elements[5], tempMatrix3.elements[8], -tempMatrix3.elements[2]);
                     set3(sh13, tempMatrix3.elements[3], -tempMatrix3.elements[6], tempMatrix3.elements[0]);
                 }
-
-                const localFromHalfFloatToUint8 = (v) => {
-                    return fromHalfFloatToUint8(v, this.minSphericalHarmonicsCoeff, this.maxSphericalHarmonicsCoeff);
-                };
-
-                const localToUint8 = (v) => {
-                    return toUint8(v, this.minSphericalHarmonicsCoeff, this.maxSphericalHarmonicsCoeff);
-                };
 
                 for (let i = srcFrom; i <= srcTo; i++) {
 
@@ -1109,16 +864,13 @@
                     let outputConversionFunc = noop;
                     if (compressionLevelForOutputConversion !== desiredOutputCompressionLevel) {
                         if (compressionLevelForOutputConversion === 1) {
-                            if (desiredOutputCompressionLevel === 0) outputConversionFunc = fromHalfFloat$1;
-                            else if (desiredOutputCompressionLevel == 2) outputConversionFunc = localFromHalfFloatToUint8;
+                            if (desiredOutputCompressionLevel === 0) outputConversionFunc = fromHalfFloat;
+                            else if (desiredOutputCompressionLevel == 2) outputConversionFunc = fromHalfFloatToUint8;
                         } else if (compressionLevelForOutputConversion === 0) {
                             if (desiredOutputCompressionLevel === 1) outputConversionFunc = toHalfFloat;
-                            else if (desiredOutputCompressionLevel == 2) outputConversionFunc = localToUint8;
+                            else if (desiredOutputCompressionLevel == 2) outputConversionFunc = toUint8;
                         }
                     }
-
-                    const minShCoeff = this.minSphericalHarmonicsCoeff;
-                    const maxShCoeff = this.maxSphericalHarmonicsCoeff;
 
                     if (outSphericalHarmonicsDegree >= 1) {
 
@@ -1127,9 +879,9 @@
                         set3FromArray(shIn3, dataView, 3, 2, this.compressionLevel);
 
                         if (transform) {
-                            toUncompressedFloatArray3(shIn1, shIn1, this.compressionLevel, minShCoeff, maxShCoeff);
-                            toUncompressedFloatArray3(shIn2, shIn2, this.compressionLevel, minShCoeff, maxShCoeff);
-                            toUncompressedFloatArray3(shIn3, shIn3, this.compressionLevel, minShCoeff, maxShCoeff);
+                            toUncompressedFloatArray3(shIn1, shIn1, this.compressionLevel);
+                            toUncompressedFloatArray3(shIn2, shIn2, this.compressionLevel);
+                            toUncompressedFloatArray3(shIn3, shIn3, this.compressionLevel);
                             SplatBuffer.rotateSphericalHarmonics3(shIn1, shIn2, shIn3, sh11, sh12, sh13, shOut1, shOut2, shOut3);
                         } else {
                             copy3(shIn1, shOut1);
@@ -1150,11 +902,11 @@
                             set3FromArray(shIn5, dataView, 5, 13, this.compressionLevel);
 
                             if (transform) {
-                                toUncompressedFloatArray3(shIn1, shIn1, this.compressionLevel, minShCoeff, maxShCoeff);
-                                toUncompressedFloatArray3(shIn2, shIn2, this.compressionLevel, minShCoeff, maxShCoeff);
-                                toUncompressedFloatArray3(shIn3, shIn3, this.compressionLevel, minShCoeff, maxShCoeff);
-                                toUncompressedFloatArray3(shIn4, shIn4, this.compressionLevel, minShCoeff, maxShCoeff);
-                                toUncompressedFloatArray3(shIn5, shIn5, this.compressionLevel, minShCoeff, maxShCoeff);
+                                toUncompressedFloatArray3(shIn1, shIn1, this.compressionLevel);
+                                toUncompressedFloatArray3(shIn2, shIn2, this.compressionLevel);
+                                toUncompressedFloatArray3(shIn3, shIn3, this.compressionLevel);
+                                toUncompressedFloatArray3(shIn4, shIn4, this.compressionLevel);
+                                toUncompressedFloatArray3(shIn5, shIn5, this.compressionLevel);
                                 SplatBuffer.rotateSphericalHarmonics5(shIn1, shIn2, shIn3, shIn4, shIn5,
                                                                       sh11, sh12, sh13, sh21, sh22, sh23, sh24, sh25,
                                                                       shOut1, shOut2, shOut3, shOut4, shOut5);
@@ -1275,9 +1027,6 @@
             const compressionLevel = headerArrayUint16[10];
             const sceneCenter = new THREE__namespace.Vector3(headerArrayFloat32[6], headerArrayFloat32[7], headerArrayFloat32[8]);
 
-            const minSphericalHarmonicsCoeff = headerArrayFloat32[9] || -DefaultSphericalHarmonics8BitCompressionHalfRange;
-            const maxSphericalHarmonicsCoeff = headerArrayFloat32[10] || DefaultSphericalHarmonics8BitCompressionHalfRange;
-
             return {
                 versionMajor,
                 versionMinor,
@@ -1286,9 +1035,7 @@
                 maxSplatCount,
                 splatCount,
                 compressionLevel,
-                sceneCenter,
-                minSphericalHarmonicsCoeff,
-                maxSphericalHarmonicsCoeff
+                sceneCenter
             };
         }
 
@@ -1315,8 +1062,6 @@
             headerArrayFloat32[6] = header.sceneCenter.x;
             headerArrayFloat32[7] = header.sceneCenter.y;
             headerArrayFloat32[8] = header.sceneCenter.z;
-            headerArrayFloat32[9] = header.minSphericalHarmonicsCoeff || -DefaultSphericalHarmonics8BitCompressionHalfRange;
-            headerArrayFloat32[10] = header.maxSphericalHarmonicsCoeff || DefaultSphericalHarmonics8BitCompressionHalfRange;
         }
 
         static parseSectionHeaders(header, buffer, offset = 0, secLoadedCountsToMax) {
@@ -1425,8 +1170,6 @@
             this.splatCount = secLoadedCountsToMax ? header.maxSplatCount : 0;
             this.compressionLevel = header.compressionLevel;
             this.sceneCenter = new THREE__namespace.Vector3().copy(header.sceneCenter);
-            this.minSphericalHarmonicsCoeff = header.minSphericalHarmonicsCoeff;
-            this.maxSphericalHarmonicsCoeff = header.maxSphericalHarmonicsCoeff;
 
             this.sections = SplatBuffer.parseSectionHeaders(header, this.bufferData, SplatBuffer.HeaderSizeBytes, secLoadedCountsToMax);
 
@@ -1492,183 +1235,65 @@
             this.sections[sectionIndex].splatCount = newSplatCount;
         }
 
-        static writeSplatDataToSectionBuffer = function() {
-
-            const tempCenterBuffer = new ArrayBuffer(12);
-            const tempScaleBuffer = new ArrayBuffer(12);
-            const tempRotationBuffer = new ArrayBuffer(16);
-            const tempColorBuffer = new ArrayBuffer(4);
-            const tempSHBuffer = new ArrayBuffer(256);
-            const tempRot = new THREE__namespace.Quaternion();
-            const tempScale = new THREE__namespace.Vector3();
-            const bucketCenterDelta = new THREE__namespace.Vector3();
-
-            const {
-                X: OFFSET_X, Y: OFFSET_Y, Z: OFFSET_Z,
-                SCALE0: OFFSET_SCALE0, SCALE1: OFFSET_SCALE1, SCALE2: OFFSET_SCALE2,
-                ROTATION0: OFFSET_ROT0, ROTATION1: OFFSET_ROT1, ROTATION2: OFFSET_ROT2, ROTATION3: OFFSET_ROT3,
-                FDC0: OFFSET_FDC0, FDC1: OFFSET_FDC1, FDC2: OFFSET_FDC2, OPACITY: OFFSET_OPACITY,
-                FRC0: OFFSET_FRC0, FRC9: OFFSET_FRC9,
-            } = UncompressedSplatArray.OFFSET;
-
-            const compressPositionOffset = (v, compressionScaleFactor, compressionScaleRange) => {
-                const doubleCompressionScaleRange = compressionScaleRange * 2 + 1;
-                v = Math.round(v * compressionScaleFactor) + compressionScaleRange;
-                return clamp(v, 0, doubleCompressionScaleRange);
-            };
-
-            return function(targetSplat, sectionBuffer, bufferOffset, compressionLevel, sphericalHarmonicsDegree,
-                            bucketCenter, compressionScaleFactor, compressionScaleRange,
-                            minSphericalHarmonicsCoeff = -DefaultSphericalHarmonics8BitCompressionHalfRange,
-                            maxSphericalHarmonicsCoeff = DefaultSphericalHarmonics8BitCompressionHalfRange) {
-
-                const sphericalHarmonicsComponentsPerSplat = getSphericalHarmonicsComponentCountForDegree(sphericalHarmonicsDegree);
-                const bytesPerCenter = SplatBuffer.CompressionLevels[compressionLevel].BytesPerCenter;
-                const bytesPerScale = SplatBuffer.CompressionLevels[compressionLevel].BytesPerScale;
-                const bytesPerRotation = SplatBuffer.CompressionLevels[compressionLevel].BytesPerRotation;
-                const bytesPerColor = SplatBuffer.CompressionLevels[compressionLevel].BytesPerColor;
-
-                const centerBase = bufferOffset;
-                const scaleBase = centerBase + bytesPerCenter;
-                const rotationBase = scaleBase + bytesPerScale;
-                const colorBase = rotationBase + bytesPerRotation;
-                const sphericalHarmonicsBase = colorBase + bytesPerColor;
-
-                if (targetSplat[OFFSET_ROT0] !== undefined) {
-                    tempRot.set(targetSplat[OFFSET_ROT0], targetSplat[OFFSET_ROT1], targetSplat[OFFSET_ROT2], targetSplat[OFFSET_ROT3]);
-                    tempRot.normalize();
-                } else {
-                    tempRot.set(1.0, 0.0, 0.0, 0.0);
-                }
-
-                if (targetSplat[OFFSET_SCALE0] !== undefined) {
-                    tempScale.set(targetSplat[OFFSET_SCALE0] || 0,
-                                  targetSplat[OFFSET_SCALE1] || 0,
-                                  targetSplat[OFFSET_SCALE2] || 0);
-                } else {
-                    tempScale.set(0, 0, 0);
-                }
-
-                if (compressionLevel === 0) {
-                    const center = new Float32Array(sectionBuffer, centerBase, SplatBuffer.CenterComponentCount);
-                    const rot = new Float32Array(sectionBuffer, rotationBase, SplatBuffer.RotationComponentCount);
-                    const scale = new Float32Array(sectionBuffer, scaleBase, SplatBuffer.ScaleComponentCount);
-
-                    rot.set([tempRot.x, tempRot.y, tempRot.z, tempRot.w]);
-                    scale.set([tempScale.x, tempScale.y, tempScale.z]);
-                    center.set([targetSplat[OFFSET_X], targetSplat[OFFSET_Y], targetSplat[OFFSET_Z]]);
-
-                    if (sphericalHarmonicsDegree > 0) {
-                        const shOut = new Float32Array(sectionBuffer, sphericalHarmonicsBase, sphericalHarmonicsComponentsPerSplat);
-                        if (sphericalHarmonicsDegree >= 1) {
-                                for (let s = 0; s < 9; s++) shOut[s] = targetSplat[OFFSET_FRC0 + s] || 0;
-                                if (sphericalHarmonicsDegree >= 2) {
-                                    for (let s = 0; s < 15; s++) shOut[s + 9] = targetSplat[OFFSET_FRC9 + s] || 0;
-                                }
-                        }
-                    }
-                } else {
-                    const center = new Uint16Array(tempCenterBuffer, 0, SplatBuffer.CenterComponentCount);
-                    const rot = new Uint16Array(tempRotationBuffer, 0, SplatBuffer.RotationComponentCount);
-                    const scale = new Uint16Array(tempScaleBuffer, 0, SplatBuffer.ScaleComponentCount);
-
-                    rot.set([toHalfFloat(tempRot.x), toHalfFloat(tempRot.y), toHalfFloat(tempRot.z), toHalfFloat(tempRot.w)]);
-                    scale.set([toHalfFloat(tempScale.x), toHalfFloat(tempScale.y), toHalfFloat(tempScale.z)]);
-
-                    bucketCenterDelta.set(targetSplat[OFFSET_X], targetSplat[OFFSET_Y], targetSplat[OFFSET_Z]).sub(bucketCenter);
-                    bucketCenterDelta.x = compressPositionOffset(bucketCenterDelta.x, compressionScaleFactor, compressionScaleRange);
-                    bucketCenterDelta.y = compressPositionOffset(bucketCenterDelta.y, compressionScaleFactor, compressionScaleRange);
-                    bucketCenterDelta.z = compressPositionOffset(bucketCenterDelta.z, compressionScaleFactor, compressionScaleRange);
-                    center.set([bucketCenterDelta.x, bucketCenterDelta.y, bucketCenterDelta.z]);
-
-                    if (sphericalHarmonicsDegree > 0) {
-                        const SHArrayType = compressionLevel === 1 ? Uint16Array : Uint8Array;
-                        const bytesPerSHComponent = compressionLevel === 1 ? 2 : 1;
-                        const shOut = new SHArrayType(tempSHBuffer, 0, sphericalHarmonicsComponentsPerSplat);
-                        if (sphericalHarmonicsDegree >= 1) {
-                            for (let s = 0; s < 9; s++) {
-                                const srcVal = targetSplat[OFFSET_FRC0 + s] || 0;
-                                shOut[s] = compressionLevel === 1 ? toHalfFloat(srcVal) :
-                                           toUint8(srcVal, minSphericalHarmonicsCoeff, maxSphericalHarmonicsCoeff);
-                            }
-                            const degree1ByteCount = 9 * bytesPerSHComponent;
-                            copyBetweenBuffers(shOut.buffer, 0, sectionBuffer, sphericalHarmonicsBase, degree1ByteCount);
-                            if (sphericalHarmonicsDegree >= 2) {
-                                for (let s = 0; s < 15; s++) {
-                                    const srcVal = targetSplat[OFFSET_FRC9 + s] || 0;
-                                    shOut[s + 9] = compressionLevel === 1 ? toHalfFloat(srcVal) :
-                                                   toUint8(srcVal, minSphericalHarmonicsCoeff, maxSphericalHarmonicsCoeff);
-                                }
-                                copyBetweenBuffers(shOut.buffer, degree1ByteCount, sectionBuffer,
-                                                   sphericalHarmonicsBase + degree1ByteCount, 15 * bytesPerSHComponent);
-                            }
-                        }
-                    }
-
-                    copyBetweenBuffers(center.buffer, 0, sectionBuffer, centerBase, 6);
-                    copyBetweenBuffers(scale.buffer, 0, sectionBuffer, scaleBase, 6);
-                    copyBetweenBuffers(rot.buffer, 0, sectionBuffer, rotationBase, 8);
-                }
-
-                const rgba = new Uint8ClampedArray(tempColorBuffer, 0, 4);
-                rgba.set([targetSplat[OFFSET_FDC0] || 0, targetSplat[OFFSET_FDC1] || 0, targetSplat[OFFSET_FDC2] || 0]);
-                rgba[3] = targetSplat[OFFSET_OPACITY] || 0;
-
-                copyBetweenBuffers(rgba.buffer, 0, sectionBuffer, colorBase, 4);
-            };
-
-        }();
-
         static generateFromUncompressedSplatArrays(splatArrays, minimumAlpha, compressionLevel,
                                                    sceneCenter, blockSize, bucketSize, options = []) {
 
-            let shDegree = 0;
+            const copyBetweenBuffers = (srcBuffer, srcOffset, destBuffer, destOffset, byteCount = 0) => {
+                const src = new Uint8Array(srcBuffer, srcOffset);
+                const dest = new Uint8Array(destBuffer, destOffset);
+                for (let i = 0; i < byteCount; i++) {
+                    dest[i] = src[i];
+                }
+            };
+
+            let sphericalHarmonicsDegree = 0;
+
             for (let sa = 0; sa < splatArrays.length; sa ++) {
                 const splatArray = splatArrays[sa];
-                shDegree = Math.max(splatArray.sphericalHarmonicsDegree, shDegree);
-            }
-
-            let minSphericalHarmonicsCoeff;
-            let maxSphericalHarmonicsCoeff;
-
-            for (let sa = 0; sa < splatArrays.length; sa ++) {
-                const splatArray = splatArrays[sa];
-                for (let i = 0; i < splatArray.splats.length; i++) {
-                    const splat = splatArray.splats[i];
-                    for (let sc = UncompressedSplatArray.OFFSET.FRC0; sc < UncompressedSplatArray.OFFSET.FRC23 && sc < splat.length; sc++) {
-                        if (!minSphericalHarmonicsCoeff || splat[sc] < minSphericalHarmonicsCoeff) {
-                            minSphericalHarmonicsCoeff = splat[sc];
-                        }
-                        if (!maxSphericalHarmonicsCoeff || splat[sc] > maxSphericalHarmonicsCoeff) {
-                            maxSphericalHarmonicsCoeff = splat[sc];
-                        }
+                if (sa === 0 || splatArray.sphericalHarmonicsDegree < sphericalHarmonicsDegree) {
+                    if (sa > 0 && splatArray.sphericalHarmonicsDegree !== sphericalHarmonicsDegree) {
+                        const msg = 'SplatBuffer::generateFromUncompressedSplatArrays() -> ' +
+                                    'all splat arrays must have the same spherical harmonics degree.';
+                        throw new Error(msg);
                     }
+                    sphericalHarmonicsDegree = splatArray.sphericalHarmonicsDegree;
                 }
             }
 
-            minSphericalHarmonicsCoeff = minSphericalHarmonicsCoeff || -DefaultSphericalHarmonics8BitCompressionHalfRange;
-            maxSphericalHarmonicsCoeff = maxSphericalHarmonicsCoeff || DefaultSphericalHarmonics8BitCompressionHalfRange;
+            const {bytesPerCenter, bytesPerScale, bytesPerRotation, bytesPerColor, sphericalHarmonicsComponentsPerSplat,
+                  sphericalHarmonicsBytesPerSplat, bytesPerSplat} =
+                  SplatBuffer.calculateComponentStorage(compressionLevel, sphericalHarmonicsDegree);
 
-            const { bytesPerSplat } = SplatBuffer.calculateComponentStorage(compressionLevel, shDegree);
             const compressionScaleRange = SplatBuffer.CompressionLevels[compressionLevel].ScaleRange;
 
             const sectionBuffers = [];
             const sectionHeaderBuffers = [];
             let totalSplatCount = 0;
 
+            const tempRotation = new THREE__namespace.Quaternion();
+
             for (let sa = 0; sa < splatArrays.length; sa ++) {
                 const splatArray = splatArrays[sa];
-                const validSplats = new UncompressedSplatArray(shDegree);
+
+                const sectionOptions = options[sa] || {};
+
+                const sectionBlockSize = (sectionOptions.blockSizeFactor || 1) * (blockSize || SplatBuffer.BucketBlockSize);
+                const sectionBucketSize = Math.ceil((sectionOptions.bucketSizeFactor || 1) * (bucketSize || SplatBuffer.BucketSize));
+
+                const validSplats = new UncompressedSplatArray(sphericalHarmonicsDegree);
+
                 for (let i = 0; i < splatArray.splatCount; i++) {
                     const targetSplat = splatArray.splats[i];
-                    if ((targetSplat[UncompressedSplatArray.OFFSET.OPACITY] || 0) >= minimumAlpha) {
+                    let alpha;
+                    if (targetSplat[UncompressedSplatArray.OFFSET.OPACITY]) {
+                        alpha = targetSplat[UncompressedSplatArray.OFFSET.OPACITY];
+                    } else {
+                        alpha = 255;
+                    }
+                    if (alpha >= minimumAlpha) {
                         validSplats.addSplat(targetSplat);
                     }
                 }
-
-                const sectionOptions = options[sa] || {};
-                const sectionBlockSize = (sectionOptions.blockSizeFactor || 1) * (blockSize || SplatBuffer.BucketBlockSize);
-                const sectionBucketSize = Math.ceil((sectionOptions.bucketSizeFactor || 1) * (bucketSize || SplatBuffer.BucketSize));
 
                 const bucketInfo = SplatBuffer.computeBucketsForUncompressedSplatArray(validSplats, sectionBlockSize, sectionBucketSize);
                 const fullBucketCount = bucketInfo.fullBuckets.length;
@@ -1683,9 +1308,18 @@
                 const sectionSizeBytes = sectionDataSizeBytes + bucketDataBytes;
                 const sectionBuffer = new ArrayBuffer(sectionSizeBytes);
 
-                const compressionScaleFactor = compressionScaleRange / (sectionBlockSize * 0.5);
-                const bucketCenter = new THREE__namespace.Vector3();
+                const blockHalfSize = sectionBlockSize / 2.0;
+                const compressionScaleFactor = compressionScaleRange / blockHalfSize;
+                const doubleCompressionScaleRange = compressionScaleRange * 2 + 1;
 
+                const tempCenterBuffer = new ArrayBuffer(bytesPerCenter);
+                const tempScaleBuffer = new ArrayBuffer(bytesPerScale);
+                const tempRotationBuffer = new ArrayBuffer(bytesPerRotation);
+                const tempColorBuffer = new ArrayBuffer(bytesPerColor);
+                const tempSHBuffer = new ArrayBuffer(sphericalHarmonicsBytesPerSplat);
+
+                const bucketCenter = new THREE__namespace.Vector3();
+                const bucketCenterDelta = new THREE__namespace.Vector3();
                 let outSplatCount = 0;
                 for (let b = 0; b < buckets.length; b++) {
                     const bucket = buckets[b];
@@ -1693,10 +1327,117 @@
                     for (let i = 0; i < bucket.splats.length; i++) {
                         let row = bucket.splats[i];
                         const targetSplat = validSplats.splats[row];
-                        const bufferOffset = bucketDataBytes + outSplatCount * bytesPerSplat;
-                        SplatBuffer.writeSplatDataToSectionBuffer(targetSplat, sectionBuffer, bufferOffset, compressionLevel, shDegree,
-                                                                  bucketCenter, compressionScaleFactor, compressionScaleRange,
-                                                                  minSphericalHarmonicsCoeff, maxSphericalHarmonicsCoeff);
+
+                        const centerBase = bucketDataBytes + outSplatCount * bytesPerSplat;
+                        const scaleBase = centerBase + bytesPerCenter;
+                        const rotationBase = scaleBase + bytesPerScale;
+                        const colorBase = rotationBase + bytesPerRotation;
+                        const sphericalHarmonicsBase = colorBase + bytesPerColor;
+                        if (compressionLevel === 0) {
+                            const center = new Float32Array(sectionBuffer, centerBase, SplatBuffer.CenterComponentCount);
+                            const rot = new Float32Array(sectionBuffer, rotationBase, SplatBuffer.RotationComponentCount);
+                            const scale = new Float32Array(sectionBuffer, scaleBase, SplatBuffer.ScaleComponentCount);
+                            if (targetSplat[UncompressedSplatArray.OFFSET.SCALE0] !== undefined) {
+                                tempRotation.set(targetSplat[UncompressedSplatArray.OFFSET.ROTATION0],
+                                                 targetSplat[UncompressedSplatArray.OFFSET.ROTATION1],
+                                                 targetSplat[UncompressedSplatArray.OFFSET.ROTATION2],
+                                                 targetSplat[UncompressedSplatArray.OFFSET.ROTATION3]);
+                                tempRotation.normalize();
+                                rot.set([tempRotation.x, tempRotation.y, tempRotation.z, tempRotation.w]);
+                                scale.set([targetSplat[UncompressedSplatArray.OFFSET.SCALE0],
+                                           targetSplat[UncompressedSplatArray.OFFSET.SCALE1],
+                                           targetSplat[UncompressedSplatArray.OFFSET.SCALE2]]);
+                            } else {
+                                rot.set([1.0, 0.0, 0.0, 0.0]);
+                                scale.set([0.01, 0.01, 0.01]);
+                            }
+                            center.set([targetSplat[UncompressedSplatArray.OFFSET.X],
+                                        targetSplat[UncompressedSplatArray.OFFSET.Y],
+                                        targetSplat[UncompressedSplatArray.OFFSET.Z]]);
+                            if (sphericalHarmonicsDegree > 0) {
+                               const shOut = new Float32Array(sectionBuffer, sphericalHarmonicsBase, sphericalHarmonicsComponentsPerSplat);
+                               if (sphericalHarmonicsDegree >= 1) {
+                                    for (let s = 0; s < 9; s++) shOut[s] = targetSplat[UncompressedSplatArray.OFFSET.FRC0 + s];
+                                    if (sphericalHarmonicsDegree >= 2) {
+                                        for (let s = 0; s < 15; s++) shOut[s + 9] = targetSplat[UncompressedSplatArray.OFFSET.FRC9 + s];
+                                    }
+                               }
+                            }
+                        } else {
+                            const center = new Uint16Array(tempCenterBuffer, 0, SplatBuffer.CenterComponentCount);
+                            const rot = new Uint16Array(tempRotationBuffer, 0, SplatBuffer.RotationComponentCount);
+                            const scale = new Uint16Array(tempScaleBuffer, 0, SplatBuffer.ScaleComponentCount);
+
+                            if (targetSplat[UncompressedSplatArray.OFFSET.SCALE0] !== undefined) {
+                                tempRotation.set(targetSplat[UncompressedSplatArray.OFFSET.ROTATION0],
+                                                 targetSplat[UncompressedSplatArray.OFFSET.ROTATION1],
+                                                 targetSplat[UncompressedSplatArray.OFFSET.ROTATION2],
+                                                 targetSplat[UncompressedSplatArray.OFFSET.ROTATION3]);
+                                tempRotation.normalize();
+                                rot.set([toHalfFloat(tempRotation.x), toHalfFloat(tempRotation.y),
+                                         toHalfFloat(tempRotation.z), toHalfFloat(tempRotation.w)]);
+                                scale.set([toHalfFloat(targetSplat[UncompressedSplatArray.OFFSET.SCALE0]),
+                                           toHalfFloat(targetSplat[UncompressedSplatArray.OFFSET.SCALE1]),
+                                           toHalfFloat(targetSplat[UncompressedSplatArray.OFFSET.SCALE2])]);
+                            } else {
+                                rot.set([toHalfFloat(1.), 0, 0, 0]);
+                                scale.set([toHalfFloat(0.01), toHalfFloat(0.01), toHalfFloat(0.01)]);
+                            }
+                            bucketCenterDelta.set(targetSplat[UncompressedSplatArray.OFFSET.X],
+                                                  targetSplat[UncompressedSplatArray.OFFSET.Y],
+                                                  targetSplat[UncompressedSplatArray.OFFSET.Z]).sub(bucketCenter);
+                            bucketCenterDelta.x = Math.round(bucketCenterDelta.x * compressionScaleFactor) + compressionScaleRange;
+                            bucketCenterDelta.x = clamp(bucketCenterDelta.x, 0, doubleCompressionScaleRange);
+                            bucketCenterDelta.y = Math.round(bucketCenterDelta.y * compressionScaleFactor) + compressionScaleRange;
+                            bucketCenterDelta.y = clamp(bucketCenterDelta.y, 0, doubleCompressionScaleRange);
+                            bucketCenterDelta.z = Math.round(bucketCenterDelta.z * compressionScaleFactor) + compressionScaleRange;
+                            bucketCenterDelta.z = clamp(bucketCenterDelta.z, 0, doubleCompressionScaleRange);
+                            center.set([bucketCenterDelta.x, bucketCenterDelta.y, bucketCenterDelta.z]);
+                            if (sphericalHarmonicsDegree > 0) {
+                                const SHArrayType = compressionLevel === 1 ? Uint16Array : Uint8Array;
+                                const bytesPerSHComponent = compressionLevel === 1 ? 2 : 1;
+                                const shOut = new SHArrayType(tempSHBuffer, 0, sphericalHarmonicsComponentsPerSplat);
+                                if (sphericalHarmonicsDegree >= 1) {
+                                    for (let s = 0; s < 9; s++) {
+                                        const srcVal = targetSplat[UncompressedSplatArray.OFFSET.FRC0 + s];
+                                        shOut[s] = compressionLevel === 1 ? toHalfFloat(srcVal) : toUint8(srcVal);
+                                    }
+                                    const degree1ByteCount = 9 * bytesPerSHComponent;
+                                    copyBetweenBuffers(shOut.buffer, 0, sectionBuffer, sphericalHarmonicsBase, degree1ByteCount);
+                                    if (sphericalHarmonicsDegree >= 2) {
+                                        for (let s = 0; s < 15; s++) {
+                                            const srcVal = targetSplat[UncompressedSplatArray.OFFSET.FRC9 + s];
+                                            shOut[s + 9] = compressionLevel === 1 ? toHalfFloat(srcVal) : toUint8(srcVal);
+                                        }
+                                        const degree2ByteCount = 15 * bytesPerSHComponent;
+                                        copyBetweenBuffers(shOut.buffer, degree1ByteCount, sectionBuffer,
+                                                           sphericalHarmonicsBase + degree1ByteCount, degree2ByteCount);
+                                    }
+                                }
+                            }
+
+                            copyBetweenBuffers(center.buffer, 0, sectionBuffer, centerBase, 6);
+                            copyBetweenBuffers(scale.buffer, 0, sectionBuffer, scaleBase, 6);
+                            copyBetweenBuffers(rot.buffer, 0, sectionBuffer, rotationBase, 8);
+                        }
+
+                        const rgba = new Uint8ClampedArray(tempColorBuffer, 0, 4);
+
+                        if (targetSplat[UncompressedSplatArray.OFFSET.FDC0] !== undefined) {
+                            rgba.set([targetSplat[UncompressedSplatArray.OFFSET.FDC0],
+                                      targetSplat[UncompressedSplatArray.OFFSET.FDC1],
+                                      targetSplat[UncompressedSplatArray.OFFSET.FDC2]]);
+                        } else {
+                            rgba.set([255, 0, 0]);
+                        }
+                        if (targetSplat[UncompressedSplatArray.OFFSET.OPACITY] !== undefined) {
+                            rgba[3] = targetSplat[UncompressedSplatArray.OFFSET.OPACITY];
+                        } else {
+                            rgba[3] = 255;
+                        }
+
+                        copyBetweenBuffers(rgba.buffer, 0, sectionBuffer, colorBase, 4);
+
                         outSplatCount++;
                     }
                 }
@@ -1730,7 +1471,7 @@
                     storageSizeBytes: sectionSizeBytes,
                     fullBucketCount: fullBucketCount,
                     partiallyFilledBucketCount: partiallyFilledBucketCount,
-                    sphericalHarmonicsDegree: shDegree
+                    sphericalHarmonicsDegree: sphericalHarmonicsDegree
                 }, compressionLevel, sectionHeaderBuffer, 0);
                 sectionHeaderBuffers.push(sectionHeaderBuffer);
 
@@ -1750,9 +1491,7 @@
                 maxSplatCount: totalSplatCount,
                 splatCount: totalSplatCount,
                 compressionLevel: compressionLevel,
-                sceneCenter: sceneCenter,
-                minSphericalHarmonicsCoeff: minSphericalHarmonicsCoeff,
-                maxSphericalHarmonicsCoeff: maxSphericalHarmonicsCoeff
+                sceneCenter: sceneCenter
             }, unifiedBuffer);
 
             let currentUnifiedBase = SplatBuffer.HeaderSizeBytes;
@@ -1843,40 +1582,6 @@
             };
         }
 
-        static preallocateUncompressed(splatCount, sphericalHarmonicsDegrees) {
-            const shDescriptor = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[sphericalHarmonicsDegrees];
-            const splatBufferDataOffsetBytes = SplatBuffer.HeaderSizeBytes + SplatBuffer.SectionHeaderSizeBytes;
-            const splatBufferSizeBytes = splatBufferDataOffsetBytes + shDescriptor.BytesPerSplat * splatCount;
-            const outBuffer = new ArrayBuffer(splatBufferSizeBytes);
-            SplatBuffer.writeHeaderToBuffer({
-                versionMajor: SplatBuffer.CurrentMajorVersion,
-                versionMinor: SplatBuffer.CurrentMinorVersion,
-                maxSectionCount: 1,
-                sectionCount: 1,
-                maxSplatCount: splatCount,
-                splatCount: splatCount,
-                compressionLevel: 0,
-                sceneCenter: new THREE__namespace.Vector3()
-            }, outBuffer);
-
-            SplatBuffer.writeSectionHeaderToBuffer({
-                maxSplatCount: splatCount,
-                splatCount: splatCount,
-                bucketSize: 0,
-                bucketCount: 0,
-                bucketBlockSize: 0,
-                compressionScaleRange: 0,
-                storageSizeBytes: 0,
-                fullBucketCount: 0,
-                partiallyFilledBucketCount: 0,
-                sphericalHarmonicsDegree: sphericalHarmonicsDegrees
-            }, 0, outBuffer, SplatBuffer.HeaderSizeBytes);
-
-            return {
-                splatBuffer: new SplatBuffer(outBuffer, true),
-                splatBufferDataOffsetBytes
-            };
-        }
     }
 
     const HeaderMagicBytes = new Uint8Array([112, 108, 121, 10]);
@@ -1945,14 +1650,13 @@
         ?.storage;
     };
 
-    class PlayCanvasCompressedPlyParser {
+    class CompressedPlyParser {
 
       static decodeHeaderText(headerText) {
 
         let element;
         let chunkElement;
         let vertexElement;
-        let shElement;
 
         const headerLines = headerText.split('\n').filter((line) => !line.startsWith('comment '));
 
@@ -1976,7 +1680,6 @@
               };
               if (element.name === 'chunk') chunkElement = element;
               else if (element.name === 'vertex') vertexElement = element;
-              else if (element.name === 'sh') shElement = element;
               break;
             case 'property': {
               if (!DataTypeMap.has(words[1])) {
@@ -2008,27 +1711,11 @@
           if (done) break;
         }
 
-        let sphericalHarmonicsDegree = 0;
-        let sphericalHarmonicsPerSplat = 0;
-        if (shElement) {
-          sphericalHarmonicsPerSplat = shElement.properties.length;
-          if (shElement.properties.length >= 45) {
-            sphericalHarmonicsDegree = 3;
-          } else if (shElement.properties.length >= 24) {
-            sphericalHarmonicsDegree = 2;
-          } else if (shElement.properties.length >= 9) {
-            sphericalHarmonicsDegree = 1;
-          }
-        }
-
         return {
           'chunkElement': chunkElement,
           'vertexElement': vertexElement,
-          'shElement': shElement,
           'bytesPerSplat': bytesPerSplat,
           'headerSizeBytes': headerText.indexOf(HeaderEndToken) + HeaderEndToken.length + 1,
-          'sphericalHarmonicsDegree': sphericalHarmonicsDegree,
-          'sphericalHarmonicsPerSplat': sphericalHarmonicsPerSplat
         };
       }
 
@@ -2097,23 +1784,13 @@
           buf.slice(0, endHeaderTokenOffset)
         );
 
-        const {
-          chunkElement,
-          vertexElement,
-          shElement,
-          sphericalHarmonicsDegree,
-          sphericalHarmonicsPerSplat,
-          bytesPerSplat
-        } = PlayCanvasCompressedPlyParser.decodeHeaderText(headerText);
+        const {chunkElement, vertexElement, bytesPerSplat} = CompressedPlyParser.decodeHeaderText(headerText);
 
         return {
           'headerSizeBytes': endHeaderTokenOffset + HeaderEndTokenBytes.length,
           'bytesPerSplat': bytesPerSplat,
           'chunkElement': chunkElement,
-          'vertexElement': vertexElement,
-          'shElement': shElement,
-          'sphericalHarmonicsDegree': sphericalHarmonicsDegree,
-          'sphericalHarmonicsPerSplat': sphericalHarmonicsPerSplat
+          'vertexElement': vertexElement
         };
       }
 
@@ -2172,87 +1849,52 @@
 
       static readPly(plyBuffer, propertyFilter = null) {
 
-        const header = PlayCanvasCompressedPlyParser.decodeHeader(plyBuffer);
+        const header = CompressedPlyParser.decodeHeader(plyBuffer);
 
-        let readIndex = PlayCanvasCompressedPlyParser.readElementData(header.chunkElement, plyBuffer,
-                                                                      header.headerSizeBytes, null, null, propertyFilter);
-        readIndex = PlayCanvasCompressedPlyParser.readElementData(header.vertexElement, plyBuffer, readIndex, null, null, propertyFilter);
-        PlayCanvasCompressedPlyParser.readElementData(header.shElement, plyBuffer, readIndex, null, null, propertyFilter);
+        let readIndex = CompressedPlyParser.readElementData(header.chunkElement, plyBuffer, header.headerSizeBytes, null, null, propertyFilter);
+        CompressedPlyParser.readElementData(header.vertexElement, plyBuffer, readIndex, null, null, propertyFilter);
 
         return {
           'chunkElement': header.chunkElement,
-          'vertexElement': header.vertexElement,
-          'shElement': header.shElement,
-          'sphericalHarmonicsDegree': header.sphericalHarmonicsDegree,
-          'sphericalHarmonicsPerSplat': header.sphericalHarmonicsPerSplat
+          'vertexElement': header.vertexElement
         };
       }
 
-      static getElementStorageArrays(chunkElement, vertexElement, shElement) {
-        const storageArrays = {};
-
-        if (vertexElement) {
-          const minR = getElementPropStorage(chunkElement, 'min_r');
-          const minG = getElementPropStorage(chunkElement, 'min_g');
-          const minB = getElementPropStorage(chunkElement, 'min_b');
-          const maxR = getElementPropStorage(chunkElement, 'max_r');
-          const maxG = getElementPropStorage(chunkElement, 'max_g');
-          const maxB = getElementPropStorage(chunkElement, 'max_b');
-          const minX = getElementPropStorage(chunkElement, 'min_x');
-          const minY = getElementPropStorage(chunkElement, 'min_y');
-          const minZ = getElementPropStorage(chunkElement, 'min_z');
-          const maxX = getElementPropStorage(chunkElement, 'max_x');
-          const maxY = getElementPropStorage(chunkElement, 'max_y');
-          const maxZ = getElementPropStorage(chunkElement, 'max_z');
-          const minScaleX = getElementPropStorage(chunkElement, 'min_scale_x');
-          const minScaleY = getElementPropStorage(chunkElement, 'min_scale_y');
-          const minScaleZ = getElementPropStorage(chunkElement, 'min_scale_z');
-          const maxScaleX = getElementPropStorage(chunkElement, 'max_scale_x');
-          const maxScaleY = getElementPropStorage(chunkElement, 'max_scale_y');
-          const maxScaleZ = getElementPropStorage(chunkElement, 'max_scale_z');
-          const position = getElementPropStorage(vertexElement, 'packed_position');
-          const rotation = getElementPropStorage(vertexElement, 'packed_rotation');
-          const scale = getElementPropStorage(vertexElement, 'packed_scale');
-          const color = getElementPropStorage(vertexElement, 'packed_color');
-
-          storageArrays['colorExtremes'] = {
-            minR, maxR,
-            minG, maxG,
-            minB, maxB
-          };
-          storageArrays['positionExtremes'] = {
+      static getElementStorageArrays(chunkElement, vertexElement) {
+        const minX = getElementPropStorage(chunkElement, 'min_x');
+        const minY = getElementPropStorage(chunkElement, 'min_y');
+        const minZ = getElementPropStorage(chunkElement, 'min_z');
+        const maxX = getElementPropStorage(chunkElement, 'max_x');
+        const maxY = getElementPropStorage(chunkElement, 'max_y');
+        const maxZ = getElementPropStorage(chunkElement, 'max_z');
+        const minScaleX = getElementPropStorage(chunkElement, 'min_scale_x');
+        const minScaleY = getElementPropStorage(chunkElement, 'min_scale_y');
+        const minScaleZ = getElementPropStorage(chunkElement, 'min_scale_z');
+        const maxScaleX = getElementPropStorage(chunkElement, 'max_scale_x');
+        const maxScaleY = getElementPropStorage(chunkElement, 'max_scale_y');
+        const maxScaleZ = getElementPropStorage(chunkElement, 'max_scale_z');
+        const position = getElementPropStorage(vertexElement, 'packed_position');
+        const rotation = getElementPropStorage(vertexElement, 'packed_rotation');
+        const scale = getElementPropStorage(vertexElement, 'packed_scale');
+        const color = getElementPropStorage(vertexElement, 'packed_color');
+        return {
+          positionExtremes: {
             minX, maxX,
             minY, maxY,
             minZ, maxZ
-          };
-          storageArrays['scaleExtremes'] = {
+          },
+          scaleExtremes: {
             minScaleX, maxScaleX, minScaleY,
             maxScaleY, minScaleZ, maxScaleZ
-          };
-          storageArrays['position'] = position;
-          storageArrays['rotation'] = rotation;
-          storageArrays['scale'] = scale;
-          storageArrays['color'] = color;
-        }
-
-        if (shElement) {
-          const shStorageArrays = {};
-          for (let i = 0; i < 45; i++) {
-            const fRestKey = `f_rest_${i}`;
-            const fRest = getElementPropStorage(shElement, fRestKey);
-            if (fRest) {
-              shStorageArrays[fRestKey] = fRest;
-            } else {
-              break;
-            }
-          }
-          storageArrays['sh'] = shStorageArrays;
-        }
-
-        return storageArrays;
+          },
+          position,
+          rotation,
+          scale,
+          color
+        };
       }
 
-      static decompressBaseSplat = function() {
+      static decompressSplat = function() {
 
         const p = new THREE__namespace.Vector3();
         const r = new THREE__namespace.Quaternion();
@@ -2262,7 +1904,7 @@
         const OFFSET = UncompressedSplatArray.OFFSET;
 
         return function(index, chunkSplatIndexOffset, positionArray, positionExtremes, scaleArray, scaleExtremes,
-                        rotationArray, colorExtremes, colorArray, outSplat) {
+                        rotationArray, colorArray, outSplat) {
           outSplat = outSplat || UncompressedSplatArray.createSplat();
 
           const chunkIndex = Math.floor((chunkSplatIndexOffset + index) / 256);
@@ -2285,21 +1927,9 @@
           outSplat[OFFSET.SCALE1] = Math.exp(lerp(scaleExtremes.minScaleY[chunkIndex], scaleExtremes.maxScaleY[chunkIndex], s.y));
           outSplat[OFFSET.SCALE2] = Math.exp(lerp(scaleExtremes.minScaleZ[chunkIndex], scaleExtremes.maxScaleZ[chunkIndex], s.z));
 
-          if (colorExtremes.minR && colorExtremes.maxR) {
-            outSplat[OFFSET.FDC0] = clamp(Math.round(lerp(colorExtremes.minR[chunkIndex], colorExtremes.maxR[chunkIndex], c.x) * 255), 0, 255);
-          } else {
-            outSplat[OFFSET.FDC0] = clamp(Math.floor(c.x * 255), 0, 255);
-          }
-          if (colorExtremes.minG && colorExtremes.maxG) {
-            outSplat[OFFSET.FDC1] = clamp(Math.round(lerp(colorExtremes.minG[chunkIndex], colorExtremes.maxG[chunkIndex], c.y) * 255), 0, 255);
-          } else {
-            outSplat[OFFSET.FDC1] = clamp(Math.floor(c.y * 255), 0, 255);
-          }
-          if (colorExtremes.minB && colorExtremes.maxB) {
-            outSplat[OFFSET.FDC2] = clamp(Math.round(lerp(colorExtremes.minB[chunkIndex], colorExtremes.maxB[chunkIndex], c.z) * 255), 0, 255);
-          } else {
-            outSplat[OFFSET.FDC2] = clamp(Math.floor(c.z * 255), 0, 255);
-          }
+          outSplat[OFFSET.FDC0] = clamp(Math.floor(c.x * 255), 0, 255);
+          outSplat[OFFSET.FDC1] = clamp(Math.floor(c.y * 255), 0, 255);
+          outSplat[OFFSET.FDC2] = clamp(Math.floor(c.z * 255), 0, 255);
           outSplat[OFFSET.OPACITY] = clamp(Math.floor(c.w * 255), 0, 255);
 
           return outSplat;
@@ -2307,353 +1937,90 @@
 
       }();
 
-      static decompressSphericalHarmonics = function() {
-
-        const shCoeffMap = [0, 3, 8, 15];
-
-        const shIndexMap = [
-          0, 1, 2, 9, 10, 11, 12, 13, 24, 25, 26, 27, 28, 29, 30,
-          3, 4, 5, 14, 15, 16, 17, 18, 31, 32, 33, 34, 35, 36, 37,
-          6, 7, 8, 19, 20, 21, 22, 23, 38, 39, 40, 41, 42, 43, 44
-        ];
-
-        return function(index, shArray, outSphericalHarmonicsDegree, readSphericalHarmonicsDegree, outSplat) {
-          outSplat = outSplat || UncompressedSplatArray.createSplat();
-          let outSHCoeff = shCoeffMap[outSphericalHarmonicsDegree];
-          let readSHCoeff = shCoeffMap[readSphericalHarmonicsDegree];
-          for (let j = 0; j < 3; ++j) {
-            for (let k = 0; k < 15; ++k) {
-              const outIndex = shIndexMap[j * 15 + k];
-              if (k < outSHCoeff && k < readSHCoeff) {
-                outSplat[UncompressedSplatArray.OFFSET.FRC0 + outIndex] = (shArray[j * readSHCoeff + k][index] * (8 / 255) - 4);
-              }
-            }
-          }
-
-          return outSplat;
-        };
-
-      }();
-
       static parseToUncompressedSplatBufferSection(chunkElement, vertexElement, fromIndex, toIndex, chunkSplatIndexOffset,
-                                                   vertexDataBuffer, outBuffer, outOffset, propertyFilter = null) {
+                                                   vertexDataBuffer, veretxReadOffset, outBuffer, outOffset, propertyFilter = null) {
 
-        PlayCanvasCompressedPlyParser.readElementData(vertexElement, vertexDataBuffer, 0, fromIndex, toIndex, propertyFilter);
+        CompressedPlyParser.readElementData(vertexElement, vertexDataBuffer, veretxReadOffset, fromIndex, toIndex, propertyFilter);
 
+        const outBytesPerCenter = SplatBuffer.CompressionLevels[0].BytesPerCenter;
+        const outBytesPerScale = SplatBuffer.CompressionLevels[0].BytesPerScale;
+        const outBytesPerRotation = SplatBuffer.CompressionLevels[0].BytesPerRotation;
         const outBytesPerSplat = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[0].BytesPerSplat;
 
-        const { positionExtremes, scaleExtremes, colorExtremes, position, rotation, scale, color } =
-          PlayCanvasCompressedPlyParser.getElementStorageArrays(chunkElement, vertexElement);
+        const { positionExtremes, scaleExtremes, position, rotation, scale, color } =
+          CompressedPlyParser.getElementStorageArrays(chunkElement, vertexElement);
 
+        const OFFSET = UncompressedSplatArray.OFFSET;
         const tempSplat = UncompressedSplatArray.createSplat();
 
         for (let i = fromIndex; i <= toIndex; ++i) {
-          PlayCanvasCompressedPlyParser.decompressBaseSplat(i, chunkSplatIndexOffset, position, positionExtremes,
-                                                            scale, scaleExtremes, rotation, colorExtremes, color, tempSplat);
+
+          CompressedPlyParser.decompressSplat(i, chunkSplatIndexOffset, position, positionExtremes,
+                                              scale, scaleExtremes, rotation, color, tempSplat);
+
           const outBase = i * outBytesPerSplat + outOffset;
-          SplatBuffer.writeSplatDataToSectionBuffer(tempSplat, outBuffer, outBase, 0, 0);
+          const outCenter = new Float32Array(outBuffer, outBase, 3);
+          const outScale = new Float32Array(outBuffer, outBase + outBytesPerCenter, 3);
+          const outRotation = new Float32Array(outBuffer, outBase + outBytesPerCenter + outBytesPerScale, 4);
+          const outColor = new Uint8Array(outBuffer, outBase + outBytesPerCenter + outBytesPerScale + outBytesPerRotation, 4);
+
+          outCenter[0] = tempSplat[OFFSET.X];
+          outCenter[1] = tempSplat[OFFSET.Y];
+          outCenter[2] = tempSplat[OFFSET.Z];
+
+          outScale[0] = tempSplat[OFFSET.SCALE0];
+          outScale[1] = tempSplat[OFFSET.SCALE1];
+          outScale[2] = tempSplat[OFFSET.SCALE2];
+
+          outRotation[0] = tempSplat[OFFSET.ROTATION0];
+          outRotation[1] = tempSplat[OFFSET.ROTATION1];
+          outRotation[2] = tempSplat[OFFSET.ROTATION2];
+          outRotation[3] = tempSplat[OFFSET.ROTATION3];
+
+          outColor[0] = tempSplat[OFFSET.FDC0];
+          outColor[1] = tempSplat[OFFSET.FDC1];
+          outColor[2] = tempSplat[OFFSET.FDC2];
+          outColor[3] = tempSplat[OFFSET.OPACITY];
         }
       }
 
-      static parseToUncompressedSplatArraySection(chunkElement, vertexElement, fromIndex, toIndex, chunkSplatIndexOffset,
-                                                  vertexDataBuffer, splatArray, propertyFilter = null) {
+      static parseToUncompressedSplatArray(plyBuffer) {
+        const { chunkElement, vertexElement } = CompressedPlyParser.readPly(plyBuffer);
 
-        PlayCanvasCompressedPlyParser.readElementData(vertexElement, vertexDataBuffer, 0, fromIndex, toIndex, propertyFilter);
+        const splatArray = new UncompressedSplatArray();
 
-        const { positionExtremes, scaleExtremes, colorExtremes, position, rotation, scale, color } =
-          PlayCanvasCompressedPlyParser.getElementStorageArrays(chunkElement, vertexElement);
-
-        for (let i = fromIndex; i <= toIndex; ++i) {
-          const tempSplat = UncompressedSplatArray.createSplat();
-          PlayCanvasCompressedPlyParser.decompressBaseSplat(i, chunkSplatIndexOffset, position, positionExtremes,
-                                                            scale, scaleExtremes, rotation, colorExtremes, color, tempSplat);
-          splatArray.addSplat(tempSplat);
-        }
-      }
-
-      static parseSphericalHarmonicsToUncompressedSplatArraySection(chunkElement, shElement, fromIndex, toIndex,
-        vertexDataBuffer, vertexReadOffset, outSphericalHarmonicsDegree, readSphericalHarmonicsDegree, splatArray, propertyFilter = null) {
-
-        PlayCanvasCompressedPlyParser.readElementData(shElement, vertexDataBuffer, vertexReadOffset, fromIndex, toIndex, propertyFilter);
-
-        const { sh } = PlayCanvasCompressedPlyParser.getElementStorageArrays(chunkElement, undefined, shElement);
-        const shArrays = Object.values(sh);
-
-        for (let i = fromIndex; i <= toIndex; ++i) {
-          PlayCanvasCompressedPlyParser.decompressSphericalHarmonics(
-            i, shArrays, outSphericalHarmonicsDegree, readSphericalHarmonicsDegree, splatArray.splats[i]
-          );
-        }
-      }
-
-      static parseToUncompressedSplatArray(plyBuffer, outSphericalHarmonicsDegree) {
-        const { chunkElement, vertexElement, shElement, sphericalHarmonicsDegree } = PlayCanvasCompressedPlyParser.readPly(plyBuffer);
-
-        outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, sphericalHarmonicsDegree);
-
-        const splatArray = new UncompressedSplatArray(outSphericalHarmonicsDegree);
-
-        const { positionExtremes, scaleExtremes, colorExtremes, position, rotation, scale, color } =
-          PlayCanvasCompressedPlyParser.getElementStorageArrays(chunkElement, vertexElement);
-
-        let shArrays;
-        if (outSphericalHarmonicsDegree > 0) {
-          const { sh } = PlayCanvasCompressedPlyParser.getElementStorageArrays(chunkElement, undefined, shElement);
-          shArrays = Object.values(sh);
-        }
+        const { positionExtremes, scaleExtremes, position, rotation, scale, color } =
+          CompressedPlyParser.getElementStorageArrays(chunkElement, vertexElement);
 
         for (let i = 0; i < vertexElement.count; ++i) {
 
           splatArray.addDefaultSplat();
           const newSplat = splatArray.getSplat(splatArray.splatCount - 1);
 
-          PlayCanvasCompressedPlyParser.decompressBaseSplat(i, 0, position, positionExtremes, scale,
-                                                            scaleExtremes, rotation, colorExtremes, color, newSplat);
-
-          if (outSphericalHarmonicsDegree > 0) {
-            PlayCanvasCompressedPlyParser.decompressSphericalHarmonics(
-              i, shArrays, outSphericalHarmonicsDegree, sphericalHarmonicsDegree, newSplat
-            );
-          }
+          CompressedPlyParser.decompressSplat(i, 0, position, positionExtremes, scale, scaleExtremes, rotation, color, newSplat);
         }
+
+        const mat = new THREE__namespace.Matrix4();
+        mat.identity();
 
         return splatArray;
       }
 
-      static parseToUncompressedSplatBuffer(plyBuffer, outSphericalHarmonicsDegree) {
-        const { chunkElement, vertexElement, shElement, sphericalHarmonicsDegree } = PlayCanvasCompressedPlyParser.readPly(plyBuffer);
-
-        outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, sphericalHarmonicsDegree);
-
-        const {
-          splatBuffer,
-          splatBufferDataOffsetBytes
-        } = SplatBuffer.preallocateUncompressed(vertexElement.count, outSphericalHarmonicsDegree);
-
-        const { positionExtremes, scaleExtremes, colorExtremes, position, rotation, scale, color } =
-        PlayCanvasCompressedPlyParser.getElementStorageArrays(chunkElement, vertexElement);
-
-        let shArrays;
-        if (outSphericalHarmonicsDegree > 0) {
-          const { sh } = PlayCanvasCompressedPlyParser.getElementStorageArrays(chunkElement, undefined, shElement);
-          shArrays = Object.values(sh);
-        }
-
-        const outBytesPerSplat = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[outSphericalHarmonicsDegree].BytesPerSplat;
-
-        const newSplat = UncompressedSplatArray.createSplat(outSphericalHarmonicsDegree);
-
-        for (let i = 0; i < vertexElement.count; ++i) {
-          PlayCanvasCompressedPlyParser.decompressBaseSplat(
-            i, 0, position, positionExtremes, scale, scaleExtremes, rotation, colorExtremes, color, newSplat
-          );
-          if (outSphericalHarmonicsDegree > 0) {
-            PlayCanvasCompressedPlyParser.decompressSphericalHarmonics(
-              i, shArrays, outSphericalHarmonicsDegree, sphericalHarmonicsDegree, newSplat
-            );
-          }
-
-          const outBase = i * outBytesPerSplat + splatBufferDataOffsetBytes;
-          SplatBuffer.writeSplatDataToSectionBuffer(newSplat, splatBuffer.bufferData, outBase, 0, outSphericalHarmonicsDegree);
-        }
-
-        return splatBuffer;
-      }
-
     }
 
-    const PlyFormat = {
-        'INRIAV1': 0,
-        'INRIAV2': 1,
-        'PlayCanvasCompressed': 2
-    };
-
-    const [
-            FieldSizeIdDouble, FieldSizeIdInt, FieldSizeIdUInt, FieldSizeIdFloat, FieldSizeIdShort, FieldSizeIdUShort, FieldSizeIdUChar
-          ] = [0, 1, 2, 3, 4, 5, 6];
-
-    const FieldSizeStringMap = {
-        'double': FieldSizeIdDouble,
-        'int': FieldSizeIdInt,
-        'uint': FieldSizeIdUInt,
-        'float': FieldSizeIdFloat,
-        'short': FieldSizeIdShort,
-        'ushort': FieldSizeIdUShort,
-        'uchar': FieldSizeIdUChar,
-    };
-
-    const FieldSize = {
-        [FieldSizeIdDouble]: 8,
-        [FieldSizeIdInt]: 4,
-        [FieldSizeIdUInt]: 4,
-        [FieldSizeIdFloat]: 4,
-        [FieldSizeIdShort]: 2,
-        [FieldSizeIdUShort]: 2,
-        [FieldSizeIdUChar]: 1,
-    };
-
-    class PlyParserUtils {
+    class PlyParser {
 
         static HeaderEndToken = 'end_header';
 
-        static decodeSectionHeader(headerLines, fieldNameIdMap, headerStartLine = 0) {
+        static BaseFields = ['scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3',
+                             'x', 'y', 'z', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'red', 'green', 'blue', 'opacity'];
 
-            const extractedLines = [];
+        static SphericalHarmonicsFields = Array.from(Array(45)).map((e, i) => (`f_rest_${i}`));
 
-            let processingSection = false;
-            let headerEndLine = -1;
-            let vertexCount = 0;
-            let endOfHeader = false;
-            let sectionName = null;
-
-            const fieldIds = [];
-            const fieldTypes = [];
-            const allFieldNames = [];
-            const usedFieldNames = [];
-            const fieldTypesByName = {};
-
-            for (let i = headerStartLine; i < headerLines.length; i++) {
-                const line = headerLines[i].trim();
-                if (line.startsWith('element')) {
-                    if (processingSection) {
-                        headerEndLine--;
-                        break;
-                    } else {
-                        processingSection = true;
-                        headerStartLine = i;
-                        headerEndLine = i;
-                        const lineComponents = line.split(' ');
-                        let validComponents = 0;
-                        for (let lineComponent of lineComponents) {
-                            const trimmedComponent = lineComponent.trim();
-                            if (trimmedComponent.length > 0) {
-                                validComponents++;
-                                if (validComponents === 2) {
-                                    sectionName = trimmedComponent;
-                                } else if (validComponents === 3) {
-                                    vertexCount = parseInt(trimmedComponent);
-                                }
-                            }
-                        }
-                    }
-                } else if (line.startsWith('property')) {
-                    const fieldMatch = line.match(/(\w+)\s+(\w+)\s+(\w+)/);
-                    if (fieldMatch) {
-                        const fieldTypeStr = fieldMatch[2];
-                        const fieldName = fieldMatch[3];
-                        allFieldNames.push(fieldName);
-                        const fieldId = fieldNameIdMap[fieldName];
-                        fieldTypesByName[fieldName] = fieldTypeStr;
-                        const fieldType = FieldSizeStringMap[fieldTypeStr];
-                        if (fieldId !== undefined) {
-                            usedFieldNames.push(fieldName);
-                            fieldIds.push(fieldId);
-                            fieldTypes[fieldId] = fieldType;
-                        }
-                    }
-                }
-                if (line === PlyParserUtils.HeaderEndToken) {
-                    endOfHeader = true;
-                    break;
-                }
-                if (processingSection) {
-                    extractedLines.push(line);
-                    headerEndLine++;
-                }
-            }
-
-            const fieldOffsets = [];
-            let bytesPerVertex = 0;
-            for (let fieldName of allFieldNames) {
-                const fieldType = fieldTypesByName[fieldName];
-                if (fieldTypesByName.hasOwnProperty(fieldName)) {
-                    const fieldId = fieldNameIdMap[fieldName];
-                    if (fieldId !== undefined) {
-                        fieldOffsets[fieldId] = bytesPerVertex;
-                    }
-                }
-                bytesPerVertex += FieldSize[FieldSizeStringMap[fieldType]];
-            }
-
-            const sphericalHarmonics = PlyParserUtils.decodeSphericalHarmonicsFromSectionHeader(allFieldNames, fieldNameIdMap);
-
-            return {
-                'headerLines': extractedLines,
-                'headerStartLine': headerStartLine,
-                'headerEndLine': headerEndLine,
-                'fieldTypes': fieldTypes,
-                'fieldIds': fieldIds,
-                'fieldOffsets': fieldOffsets,
-                'bytesPerVertex': bytesPerVertex,
-                'vertexCount': vertexCount,
-                'dataSizeBytes': bytesPerVertex * vertexCount,
-                'endOfHeader': endOfHeader,
-                'sectionName': sectionName,
-                'sphericalHarmonicsDegree': sphericalHarmonics.degree,
-                'sphericalHarmonicsCoefficientsPerChannel': sphericalHarmonics.coefficientsPerChannel,
-                'sphericalHarmonicsDegree1Fields': sphericalHarmonics.degree1Fields,
-                'sphericalHarmonicsDegree2Fields': sphericalHarmonics.degree2Fields
-            };
-
-        }
-
-        static decodeSphericalHarmonicsFromSectionHeader(fieldNames, fieldNameIdMap) {
-            let sphericalHarmonicsFieldCount = 0;
-            let coefficientsPerChannel = 0;
-            for (let fieldName of fieldNames) {
-                if (fieldName.startsWith('f_rest')) sphericalHarmonicsFieldCount++;
-            }
-            coefficientsPerChannel = sphericalHarmonicsFieldCount / 3;
-            let degree = 0;
-            if (coefficientsPerChannel >= 3) degree = 1;
-            if (coefficientsPerChannel >= 8) degree = 2;
-
-            let degree1Fields = [];
-            let degree2Fields = [];
-
-            for (let rgb = 0; rgb < 3; rgb++) {
-                if (degree >= 1) {
-                    for (let i = 0; i < 3; i++) {
-                        degree1Fields.push(fieldNameIdMap['f_rest_' + (i + coefficientsPerChannel * rgb)]);
-                    }
-                }
-                if (degree >= 2) {
-                    for (let i = 0; i < 5; i++) {
-                        degree2Fields.push(fieldNameIdMap['f_rest_' + (i + coefficientsPerChannel * rgb + 3)]);
-                    }
-                }
-            }
-
-            return {
-                'degree': degree,
-                'coefficientsPerChannel': coefficientsPerChannel,
-                'degree1Fields': degree1Fields,
-                'degree2Fields': degree2Fields
-            };
-        }
-
-        static getHeaderSectionNames(headerLines) {
-            const sectionNames = [];
-            for (let headerLine of headerLines) {
-                if (headerLine.startsWith('element')) {
-                    const lineComponents = headerLine.split(' ');
-                    let validComponents = 0;
-                    for (let lineComponent of lineComponents) {
-                        const trimmedComponent = lineComponent.trim();
-                        if (trimmedComponent.length > 0) {
-                            validComponents++;
-                            if (validComponents === 2) {
-                                sectionNames.push(trimmedComponent);
-                            }
-                        }
-                    }
-                }
-            }
-            return sectionNames;
-        }
+        static Fields = [[...PlyParser.BaseFields], [...PlyParser.BaseFields, ...PlyParser.SphericalHarmonicsFields]];
 
         static checkTextForEndHeader(endHeaderTestText) {
-            if (endHeaderTestText.includes(PlyParserUtils.HeaderEndToken)) {
+            if (endHeaderTestText.includes(PlyParser.HeaderEndToken)) {
                 return true;
             }
             return false;
@@ -2662,671 +2029,323 @@
         static checkBufferForEndHeader(buffer, searchOfset, chunkSize, decoder) {
             const endHeaderTestChunk = new Uint8Array(buffer, Math.max(0, searchOfset - chunkSize), chunkSize);
             const endHeaderTestText = decoder.decode(endHeaderTestChunk);
-            return PlyParserUtils.checkTextForEndHeader(endHeaderTestText);
-        }
-
-        static extractHeaderFromBufferToText(plyBuffer) {
-            const decoder = new TextDecoder();
-            let headerOffset = 0;
-            let headerText = '';
-            const readChunkSize = 100;
-
-            while (true) {
-                if (headerOffset + readChunkSize >= plyBuffer.byteLength) {
-                    throw new Error('End of file reached while searching for end of header');
-                }
-                const headerChunk = new Uint8Array(plyBuffer, headerOffset, readChunkSize);
-                headerText += decoder.decode(headerChunk);
-                headerOffset += readChunkSize;
-
-                if (PlyParserUtils.checkBufferForEndHeader(plyBuffer, headerOffset, readChunkSize * 2, decoder)) {
-                    break;
-                }
-            }
-
-            return headerText;
-        }
-
-        static readHeaderFromBuffer(plyBuffer) {
-            const decoder = new TextDecoder();
-            let headerOffset = 0;
-            let headerText = '';
-            const readChunkSize = 100;
-
-            while (true) {
-                if (headerOffset + readChunkSize >= plyBuffer.byteLength) {
-                    throw new Error('End of file reached while searching for end of header');
-                }
-                const headerChunk = new Uint8Array(plyBuffer, headerOffset, readChunkSize);
-                headerText += decoder.decode(headerChunk);
-                headerOffset += readChunkSize;
-
-                if (PlyParserUtils.checkBufferForEndHeader(plyBuffer, headerOffset, readChunkSize * 2, decoder)) {
-                    break;
-                }
-            }
-
-            return headerText;
-        }
-
-        static convertHeaderTextToLines(headerText) {
-            const headerLines = headerText.split('\n');
-            const prunedLines = [];
-            for (let i = 0; i < headerLines.length; i++) {
-                const line = headerLines[i].trim();
-                prunedLines.push(line);
-                if (line === PlyParserUtils.HeaderEndToken) {
-                    break;
-                }
-            }
-            return prunedLines;
-        }
-
-        static determineHeaderFormatFromHeaderText(headertText) {
-            const headerLines = PlyParserUtils.convertHeaderTextToLines(headertText);
-            let format = PlyFormat.INRIAV1;
-            for (let i = 0; i < headerLines.length; i++) {
-                const line = headerLines[i].trim();
-                if (line.startsWith('element chunk') || line.match(/[A-Za-z]*packed_[A-Za-z]*/)) {
-                    format = PlyFormat.PlayCanvasCompressed;
-                } else if (line.startsWith('element codebook_centers')) {
-                    format = PlyFormat.INRIAV2;
-                } else if (line === PlyParserUtils.HeaderEndToken) {
-                    break;
-                }
-            }
-            return format;
-        }
-
-        static determineHeaderFormatFromPlyBuffer(plyBuffer) {
-            const headertText = PlyParserUtils.extractHeaderFromBufferToText(plyBuffer);
-            return PlyParserUtils.determineHeaderFormatFromHeaderText(headertText);
-        }
-
-        static readVertex(vertexData, header, row, dataOffset, fieldsToRead, rawVertex, normalize = true) {
-            const offset = row * header.bytesPerVertex + dataOffset;
-            const fieldOffsets = header.fieldOffsets;
-            const fieldTypes = header.fieldTypes;
-            for (let fieldId of fieldsToRead) {
-                const fieldType = fieldTypes[fieldId];
-                if (fieldType === FieldSizeIdFloat) {
-                    rawVertex[fieldId] = vertexData.getFloat32(offset + fieldOffsets[fieldId], true);
-                } else if (fieldType === FieldSizeIdShort) {
-                    rawVertex[fieldId] = vertexData.getInt16(offset + fieldOffsets[fieldId], true);
-                } else if (fieldType === FieldSizeIdUShort) {
-                    rawVertex[fieldId] = vertexData.getUint16(offset + fieldOffsets[fieldId], true);
-                } else if (fieldType === FieldSizeIdInt) {
-                    rawVertex[fieldId] = vertexData.getInt32(offset + fieldOffsets[fieldId], true);
-                } else if (fieldType === FieldSizeIdUInt) {
-                    rawVertex[fieldId] = vertexData.getUint32(offset + fieldOffsets[fieldId], true);
-                } else if (fieldType === FieldSizeIdUChar) {
-                    if (normalize) {
-                        rawVertex[fieldId] = vertexData.getUint8(offset + fieldOffsets[fieldId]) / 255.0;
-                    } else {
-                        rawVertex[fieldId] = vertexData.getUint8(offset + fieldOffsets[fieldId]);
-                    }
-                }
-            }
-        }
-    }
-
-    const BaseFieldNamesToRead = ['scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3', 'x', 'y', 'z',
-                                  'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity', 'red', 'green', 'blue', 'f_rest_0'];
-
-    const BaseFieldsToReadIndexes = BaseFieldNamesToRead.map((e, i) => i);
-
-    const [
-            SCALE_0, SCALE_1, SCALE_2, ROT_0, ROT_1, ROT_2, ROT_3, X, Y, Z, F_DC_0, F_DC_1, F_DC_2, OPACITY, RED$1, GREEN$1, BLUE$1, F_REST_0
-          ] = BaseFieldsToReadIndexes;
-
-    class INRIAV1PlyParser {
-
-        static decodeHeaderLines(headerLines) {
-
-            let shLineCount = 0;
-            headerLines.forEach((line) => {
-                if (line.includes('f_rest_')) shLineCount++;
-            });
-
-            let shFieldsToReadCount = 0;
-            if (shLineCount >= 45) {
-                shFieldsToReadCount = 45;
-            } else if (shLineCount >= 24) {
-                shFieldsToReadCount = 24;
-            } else if (shLineCount >= 9) {
-                shFieldsToReadCount = 9;
-            }
-
-            const shFieldIndexesToMap = Array.from(Array(Math.max(shFieldsToReadCount - 1, 0)));
-            let shRemainingFieldNamesToRead = shFieldIndexesToMap.map((element, index) => `f_rest_${index + 1}`);
-
-            const fieldNamesToRead = [...BaseFieldNamesToRead, ...shRemainingFieldNamesToRead];
-            const fieldsToReadIndexes = fieldNamesToRead.map((e, i) => i);
-
-            const fieldNameIdMap = fieldsToReadIndexes.reduce((acc, element) => {
-                acc[fieldNamesToRead[element]] = element;
-                return acc;
-            }, {});
-            const header = PlyParserUtils.decodeSectionHeader(headerLines, fieldNameIdMap, 0);
-            header.splatCount = header.vertexCount;
-            header.bytesPerSplat = header.bytesPerVertex;
-            header.fieldsToReadIndexes = fieldsToReadIndexes;
-            return header;
+            return PlyParser.checkTextForEndHeader(endHeaderTestText);
         }
 
         static decodeHeaderText(headerText) {
-            const headerLines = PlyParserUtils.convertHeaderTextToLines(headerText);
-            const header = INRIAV1PlyParser.decodeHeaderLines(headerLines);
-            header.headerText = headerText;
-            header.headerSizeBytes = headerText.indexOf(PlyParserUtils.HeaderEndToken) + PlyParserUtils.HeaderEndToken.length + 1;
-            return header;
+            const headerLines = headerText.split('\n');
+
+            const prunedLines = [];
+
+            let splatCount = 0;
+            let propertyTypes = {};
+            let compressed = false;
+
+            for (let i = 0; i < headerLines.length; i++) {
+                const line = headerLines[i].trim();
+                prunedLines.push(line);
+                if (line.startsWith('element chunk') || line.match(/[A-Za-z]*packed_[A-Za-z]*/)) {
+                    compressed = true;
+                } else if (line.startsWith('element vertex')) {
+                    const splatCountMatch = line.match(/\d+/);
+                    if (splatCountMatch) {
+                        splatCount = parseInt(splatCountMatch[0]);
+                    }
+                } else if (line.startsWith('property')) {
+                    const propertyMatch = line.match(/(\w+)\s+(\w+)\s+(\w+)/);
+                    if (propertyMatch) {
+                        const propertyType = propertyMatch[2];
+                        const propertyName = propertyMatch[3];
+                        propertyTypes[propertyName] = propertyType;
+                    }
+                } else if (line === PlyParser.HeaderEndToken) {
+                    break;
+                }
+            }
+
+            let bytesPerSplat = 0;
+            let fieldOffsets = {};
+            const fieldSize = {
+                'double': 8,
+                'int': 4,
+                'uint': 4,
+                'float': 4,
+                'short': 2,
+                'ushort': 2,
+                'uchar': 1,
+            };
+
+            const fieldNames = [];
+            for (let fieldName in propertyTypes) {
+                if (propertyTypes.hasOwnProperty(fieldName)) {
+                    fieldNames.push(fieldName);
+                    const type = propertyTypes[fieldName];
+                    fieldOffsets[fieldName] = bytesPerSplat;
+                    bytesPerSplat += fieldSize[type];
+                }
+            }
+
+            let sphericalHarmonicsFieldCount = 0;
+            let sphericalHarmonicsCoefficientsPerChannel = 0;
+            for (let fieldName of fieldNames) {
+                if (fieldName.startsWith('f_rest')) sphericalHarmonicsFieldCount++;
+            }
+            sphericalHarmonicsCoefficientsPerChannel = sphericalHarmonicsFieldCount / 3;
+            let sphericalHarmonicsDegree = 0;
+            if (sphericalHarmonicsCoefficientsPerChannel >= 3) sphericalHarmonicsDegree = 1;
+            if (sphericalHarmonicsCoefficientsPerChannel >= 8) sphericalHarmonicsDegree = 2;
+
+            let sphericalHarmonicsDegree1Fields = [];
+            if (sphericalHarmonicsDegree >= 1) {
+                for (let rgb = 0; rgb < 3; rgb++) {
+                    for (let i = 0; i < 3; i++) {
+                        sphericalHarmonicsDegree1Fields.push('f_rest_' + (i + sphericalHarmonicsCoefficientsPerChannel * rgb));
+                    }
+                }
+            }
+
+            let sphericalHarmonicsDegree2Fields = [];
+            if (sphericalHarmonicsDegree >= 2) {
+                for (let rgb = 0; rgb < 3; rgb++) {
+                    for (let i = 0; i < 5; i++) {
+                        sphericalHarmonicsDegree2Fields.push('f_rest_' + (i + sphericalHarmonicsCoefficientsPerChannel * rgb + 3));
+                    }
+                }
+            }
+
+            return {
+                'splatCount': splatCount,
+                'propertyTypes': propertyTypes,
+                'compressed': compressed,
+                'headerText': headerText,
+                'headerLines': prunedLines,
+                'headerSizeBytes': headerText.indexOf(PlyParser.HeaderEndToken) + PlyParser.HeaderEndToken.length + 1,
+                'bytesPerSplat': bytesPerSplat,
+                'fieldOffsets': fieldOffsets,
+                'sphericalHarmonicsDegree': sphericalHarmonicsDegree,
+                'sphericalHarmonicsCoefficientsPerChannel': sphericalHarmonicsCoefficientsPerChannel,
+                'sphericalHarmonicsDegree1Fields': sphericalHarmonicsDegree1Fields,
+                'sphericalHarmonicsDegree2Fields': sphericalHarmonicsDegree2Fields
+            };
         }
 
-        static decodeHeaderFromBuffer(plyBuffer) {
-            const headerText = PlyParserUtils.readHeaderFromBuffer(plyBuffer);
-            return INRIAV1PlyParser.decodeHeaderText(headerText);
+        static decodeHeadeFromBuffer(plyBuffer) {
+            const decoder = new TextDecoder();
+            let headerOffset = 0;
+            let headerText = '';
+            const readChunkSize = 100;
+
+            while (true) {
+                if (headerOffset + readChunkSize >= plyBuffer.byteLength) {
+                    throw new Error('End of file reached while searching for end of header');
+                }
+                const headerChunk = new Uint8Array(plyBuffer, headerOffset, readChunkSize);
+                headerText += decoder.decode(headerChunk);
+                headerOffset += readChunkSize;
+
+                if (PlyParser.checkBufferForEndHeader(plyBuffer, headerOffset, readChunkSize * 2, decoder)) {
+                    break;
+                }
+            }
+
+            return PlyParser.decodeHeaderText(headerText);
+
         }
 
-        static findSplatData(plyBuffer, header) {
+        static findVertexData(plyBuffer, header) {
             return new DataView(plyBuffer, header.headerSizeBytes);
         }
 
-        static parseToUncompressedSplatBufferSection(header, fromSplat, toSplat, splatData, splatDataOffset,
+        static readRawVertexFast(vertexData, offset, fieldOffsets, propertiesToRead, propertyTypes, outVertex) {
+            let rawVertex = outVertex || {};
+            for (let property of propertiesToRead) {
+                const propertyType = propertyTypes[property];
+                if (propertyType === 'float') {
+                    rawVertex[property] = vertexData.getFloat32(offset + fieldOffsets[property], true);
+                } else if (propertyType === 'uchar') {
+                    rawVertex[property] = vertexData.getUint8(offset + fieldOffsets[property]) / 255.0;
+                }
+            }
+        }
+
+        static parseToUncompressedSplatBufferSection(header, fromSplat, toSplat, vertexData, vertexDataOffset,
                                                      toBuffer, toOffset, outSphericalHarmonicsDegree = 0) {
             outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, header.sphericalHarmonicsDegree);
+            const outBytesPerCenter = SplatBuffer.CompressionLevels[0].BytesPerCenter;
+            const outBytesPerScale = SplatBuffer.CompressionLevels[0].BytesPerScale;
+            const outBytesPerRotation = SplatBuffer.CompressionLevels[0].BytesPerRotation;
+            const outBytesPerColor = SplatBuffer.CompressionLevels[0].BytesPerColor;
             const outBytesPerSplat = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[outSphericalHarmonicsDegree].BytesPerSplat;
 
             for (let i = fromSplat; i <= toSplat; i++) {
-                const parsedSplat = INRIAV1PlyParser.parseToUncompressedSplat(splatData, i, header,
-                                                                              splatDataOffset, outSphericalHarmonicsDegree);
+
+                const parsedSplat = PlyParser.parseToUncompressedSplat(vertexData, i, header, vertexDataOffset, outSphericalHarmonicsDegree);
+
                 const outBase = i * outBytesPerSplat + toOffset;
-                SplatBuffer.writeSplatDataToSectionBuffer(parsedSplat, toBuffer, outBase, 0, outSphericalHarmonicsDegree);
-            }
-        }
+                const outCenter = new Float32Array(toBuffer, outBase, 3);
+                const outScale = new Float32Array(toBuffer, outBase + outBytesPerCenter, 3);
+                const outRotation = new Float32Array(toBuffer, outBase + outBytesPerCenter + outBytesPerScale, 4);
+                const outColor = new Uint8Array(toBuffer, outBase + outBytesPerCenter + outBytesPerScale + outBytesPerRotation, 4);
 
-        static parseToUncompressedSplatArraySection(header, fromSplat, toSplat, splatData, splatDataOffset,
-                                             splatArray, outSphericalHarmonicsDegree = 0) {
-            outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, header.sphericalHarmonicsDegree);
-            for (let i = fromSplat; i <= toSplat; i++) {
-                const parsedSplat = INRIAV1PlyParser.parseToUncompressedSplat(splatData, i, header,
-                                                                              splatDataOffset, outSphericalHarmonicsDegree);
-                splatArray.addSplat(parsedSplat);
-            }
-        }
+                outCenter[0] = parsedSplat[UncompressedSplatArray.OFFSET.X];
+                outCenter[1] = parsedSplat[UncompressedSplatArray.OFFSET.Y];
+                outCenter[2] = parsedSplat[UncompressedSplatArray.OFFSET.Z];
 
-        static decodeSectionSplatData(sectionSplatData, splatCount, sectionHeader, outSphericalHarmonicsDegree, toSplatArray = true) {
-            outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, sectionHeader.sphericalHarmonicsDegree);
-            if (toSplatArray) {
-                const splatArray = new UncompressedSplatArray(outSphericalHarmonicsDegree);
-                for (let row = 0; row < splatCount; row++) {
-                    const newSplat = INRIAV1PlyParser.parseToUncompressedSplat(sectionSplatData, row, sectionHeader,
-                                                                               0, outSphericalHarmonicsDegree);
-                    splatArray.addSplat(newSplat);
+                outScale[0] = parsedSplat[UncompressedSplatArray.OFFSET.SCALE0];
+                outScale[1] = parsedSplat[UncompressedSplatArray.OFFSET.SCALE1];
+                outScale[2] = parsedSplat[UncompressedSplatArray.OFFSET.SCALE2];
+
+                outRotation[0] = parsedSplat[UncompressedSplatArray.OFFSET.ROTATION0];
+                outRotation[1] = parsedSplat[UncompressedSplatArray.OFFSET.ROTATION1];
+                outRotation[2] = parsedSplat[UncompressedSplatArray.OFFSET.ROTATION2];
+                outRotation[3] = parsedSplat[UncompressedSplatArray.OFFSET.ROTATION3];
+
+                outColor[0] = parsedSplat[UncompressedSplatArray.OFFSET.FDC0];
+                outColor[1] = parsedSplat[UncompressedSplatArray.OFFSET.FDC1];
+                outColor[2] = parsedSplat[UncompressedSplatArray.OFFSET.FDC2];
+                outColor[3] = parsedSplat[UncompressedSplatArray.OFFSET.OPACITY];
+
+                if (outSphericalHarmonicsDegree >= 1) {
+                    const outSphericalHarmonics = new Float32Array(toBuffer, outBase + outBytesPerCenter + outBytesPerScale +
+                                                                   outBytesPerRotation + outBytesPerColor,
+                                                                   parsedSplat.sphericalHarmonicsCount);
+                    for (let i = 0; i <= 8; i++) {
+                        outSphericalHarmonics[i] = parsedSplat[UncompressedSplatArray.OFFSET.FRC0 + i];
+                    }
+                    if (outSphericalHarmonicsDegree >= 2) {
+                        for (let i = 9; i <= 23; i++) {
+                            outSphericalHarmonics[i] = parsedSplat[UncompressedSplatArray.OFFSET.FRC0 + i];
+                        }
+                    }
                 }
-                return splatArray;
-            } else {
-                const {
-                    splatBuffer,
-                    splatBufferDataOffsetBytes
-                  } = SplatBuffer.preallocateUncompressed(splatCount, outSphericalHarmonicsDegree);
-                INRIAV1PlyParser.parseToUncompressedSplatBufferSection(
-                    sectionHeader, 0, splatCount - 1, sectionSplatData, 0,
-                    splatBuffer.bufferData, splatBufferDataOffsetBytes, outSphericalHarmonicsDegree
-                );
-                return splatBuffer;
             }
         }
 
         static parseToUncompressedSplat = function() {
 
-            let rawSplat = [];
+            let rawVertex = {};
             const tempRotation = new THREE__namespace.Quaternion();
 
-            const OFFSET_X = UncompressedSplatArray.OFFSET.X;
-            const OFFSET_Y = UncompressedSplatArray.OFFSET.Y;
-            const OFFSET_Z = UncompressedSplatArray.OFFSET.Z;
-
-            const OFFSET_SCALE0 = UncompressedSplatArray.OFFSET.SCALE0;
-            const OFFSET_SCALE1 = UncompressedSplatArray.OFFSET.SCALE1;
-            const OFFSET_SCALE2 = UncompressedSplatArray.OFFSET.SCALE2;
-
-            const OFFSET_ROTATION0 = UncompressedSplatArray.OFFSET.ROTATION0;
-            const OFFSET_ROTATION1 = UncompressedSplatArray.OFFSET.ROTATION1;
-            const OFFSET_ROTATION2 = UncompressedSplatArray.OFFSET.ROTATION2;
-            const OFFSET_ROTATION3 = UncompressedSplatArray.OFFSET.ROTATION3;
-
-            const OFFSET_FDC0 = UncompressedSplatArray.OFFSET.FDC0;
-            const OFFSET_FDC1 = UncompressedSplatArray.OFFSET.FDC1;
-            const OFFSET_FDC2 = UncompressedSplatArray.OFFSET.FDC2;
-            const OFFSET_OPACITY = UncompressedSplatArray.OFFSET.OPACITY;
-
-            const OFFSET_FRC = [];
-
-            for (let i = 0; i < 45; i++) {
-                OFFSET_FRC[i] = UncompressedSplatArray.OFFSET.FRC0 + i;
-            }
-
-            return function(splatData, row, header, splatDataOffset = 0, outSphericalHarmonicsDegree = 0) {
+            return function(vertexData, row, header, vertexDataOffset = 0, outSphericalHarmonicsDegree = 0) {
                 outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, header.sphericalHarmonicsDegree);
-                INRIAV1PlyParser.readSplat(splatData, header, row, splatDataOffset, rawSplat);
+                PlyParser.readRawVertexFast(vertexData, row * header.bytesPerSplat + vertexDataOffset, header.fieldOffsets,
+                                            PlyParser.Fields[outSphericalHarmonicsDegree > 0 ? 1 : 0], header.propertyTypes, rawVertex);
                 const newSplat = UncompressedSplatArray.createSplat(outSphericalHarmonicsDegree);
-                if (rawSplat[SCALE_0] !== undefined) {
-                    newSplat[OFFSET_SCALE0] = Math.exp(rawSplat[SCALE_0]);
-                    newSplat[OFFSET_SCALE1] = Math.exp(rawSplat[SCALE_1]);
-                    newSplat[OFFSET_SCALE2] = Math.exp(rawSplat[SCALE_2]);
+                if (rawVertex['scale_0'] !== undefined) {
+                    newSplat[UncompressedSplatArray.OFFSET.SCALE0] = Math.exp(rawVertex['scale_0']);
+                    newSplat[UncompressedSplatArray.OFFSET.SCALE1] = Math.exp(rawVertex['scale_1']);
+                    newSplat[UncompressedSplatArray.OFFSET.SCALE2] = Math.exp(rawVertex['scale_2']);
                 } else {
-                    newSplat[OFFSET_SCALE0] = 0.01;
-                    newSplat[OFFSET_SCALE1] = 0.01;
-                    newSplat[OFFSET_SCALE2] = 0.01;
+                    newSplat[UncompressedSplatArray.OFFSET.SCALE0] = 0.01;
+                    newSplat[UncompressedSplatArray.OFFSET.SCALE1] = 0.01;
+                    newSplat[UncompressedSplatArray.OFFSET.SCALE2] = 0.01;
                 }
 
-                if (rawSplat[F_DC_0] !== undefined) {
+                if (rawVertex['f_dc_0'] !== undefined) {
                     const SH_C0 = 0.28209479177387814;
-                    newSplat[OFFSET_FDC0] = (0.5 + SH_C0 * rawSplat[F_DC_0]) * 255;
-                    newSplat[OFFSET_FDC1] = (0.5 + SH_C0 * rawSplat[F_DC_1]) * 255;
-                    newSplat[OFFSET_FDC2] = (0.5 + SH_C0 * rawSplat[F_DC_2]) * 255;
-                } else if (rawSplat[RED$1] !== undefined) {
-                    newSplat[OFFSET_FDC0] = rawSplat[RED$1] * 255;
-                    newSplat[OFFSET_FDC1] = rawSplat[GREEN$1] * 255;
-                    newSplat[OFFSET_FDC2] = rawSplat[BLUE$1] * 255;
+                    newSplat[UncompressedSplatArray.OFFSET.FDC0] = (0.5 + SH_C0 * rawVertex['f_dc_0']) * 255;
+                    newSplat[UncompressedSplatArray.OFFSET.FDC1] = (0.5 + SH_C0 * rawVertex['f_dc_1']) * 255;
+                    newSplat[UncompressedSplatArray.OFFSET.FDC2] = (0.5 + SH_C0 * rawVertex['f_dc_2']) * 255;
+                } else if (rawVertex['red'] !== undefined) {
+                    newSplat[UncompressedSplatArray.OFFSET.FDC0] = rawVertex['red'] * 255;
+                    newSplat[UncompressedSplatArray.OFFSET.FDC1] = rawVertex['green'] * 255;
+                    newSplat[UncompressedSplatArray.OFFSET.FDC2] = rawVertex['blue'] * 255;
                 } else {
-                    newSplat[OFFSET_FDC0] = 0;
-                    newSplat[OFFSET_FDC1] = 0;
-                    newSplat[OFFSET_FDC2] = 0;
+                    newSplat[UncompressedSplatArray.OFFSET.FDC0] = 0;
+                    newSplat[UncompressedSplatArray.OFFSET.FDC1] = 0;
+                    newSplat[UncompressedSplatArray.OFFSET.FDC2] = 0;
                 }
 
-                if (rawSplat[OPACITY] !== undefined) {
-                    newSplat[OFFSET_OPACITY] = (1 / (1 + Math.exp(-rawSplat[OPACITY]))) * 255;
+                if (rawVertex['opacity'] !== undefined) {
+                    newSplat[UncompressedSplatArray.OFFSET.OPACITY] = (1 / (1 + Math.exp(-rawVertex['opacity']))) * 255;
                 }
 
-                newSplat[OFFSET_FDC0] = clamp(Math.floor(newSplat[OFFSET_FDC0]), 0, 255);
-                newSplat[OFFSET_FDC1] = clamp(Math.floor(newSplat[OFFSET_FDC1]), 0, 255);
-                newSplat[OFFSET_FDC2] = clamp(Math.floor(newSplat[OFFSET_FDC2]), 0, 255);
-                newSplat[OFFSET_OPACITY] = clamp(Math.floor(newSplat[OFFSET_OPACITY]), 0, 255);
+                newSplat[UncompressedSplatArray.OFFSET.FDC0] = clamp(Math.floor(newSplat[UncompressedSplatArray.OFFSET.FDC0]), 0, 255);
+                newSplat[UncompressedSplatArray.OFFSET.FDC1] = clamp(Math.floor(newSplat[UncompressedSplatArray.OFFSET.FDC1]), 0, 255);
+                newSplat[UncompressedSplatArray.OFFSET.FDC2] = clamp(Math.floor(newSplat[UncompressedSplatArray.OFFSET.FDC2]), 0, 255);
+                newSplat[UncompressedSplatArray.OFFSET.OPACITY] = clamp(Math.floor(newSplat[UncompressedSplatArray.OFFSET.OPACITY]), 0, 255);
 
                 if (outSphericalHarmonicsDegree >= 1) {
-                    if (rawSplat[F_REST_0] !== undefined) {
+                    if (rawVertex['f_rest_0'] !== undefined) {
                         for (let i = 0; i < 9; i++) {
-                            newSplat[OFFSET_FRC[i]] = rawSplat[header.sphericalHarmonicsDegree1Fields[i]];
+                            newSplat[UncompressedSplatArray.OFFSET.FRC0 + i] = rawVertex[header.sphericalHarmonicsDegree1Fields[i]];
                         }
                         if (outSphericalHarmonicsDegree >= 2) {
                             for (let i = 0; i < 15; i++) {
-                                newSplat[OFFSET_FRC[9 + i]] = rawSplat[header.sphericalHarmonicsDegree2Fields[i]];
+                                newSplat[UncompressedSplatArray.OFFSET.FRC9 + i] = rawVertex[header.sphericalHarmonicsDegree2Fields[i]];
                             }
                         }
-                    }
-                }
-
-                tempRotation.set(rawSplat[ROT_0], rawSplat[ROT_1], rawSplat[ROT_2], rawSplat[ROT_3]);
-                tempRotation.normalize();
-
-                newSplat[OFFSET_ROTATION0] = tempRotation.x;
-                newSplat[OFFSET_ROTATION1] = tempRotation.y;
-                newSplat[OFFSET_ROTATION2] = tempRotation.z;
-                newSplat[OFFSET_ROTATION3] = tempRotation.w;
-
-                newSplat[OFFSET_X] = rawSplat[X];
-                newSplat[OFFSET_Y] = rawSplat[Y];
-                newSplat[OFFSET_Z] = rawSplat[Z];
-
-                return newSplat;
-            };
-
-        }();
-
-        static readSplat(splatData, header, row, dataOffset, rawSplat) {
-            return PlyParserUtils.readVertex(splatData, header, row, dataOffset, header.fieldsToReadIndexes, rawSplat, true);
-        }
-
-        static parseToUncompressedSplatArray(plyBuffer, outSphericalHarmonicsDegree = 0) {
-            const { header, splatCount, splatData } = separatePlyHeaderAndData(plyBuffer);
-            return INRIAV1PlyParser.decodeSectionSplatData(splatData, splatCount, header, outSphericalHarmonicsDegree, true);
-        }
-
-        static parseToUncompressedSplatBuffer(plyBuffer, outSphericalHarmonicsDegree = 0) {
-            const { header, splatCount, splatData } = separatePlyHeaderAndData(plyBuffer);
-            return INRIAV1PlyParser.decodeSectionSplatData(splatData, splatCount, header, outSphericalHarmonicsDegree, false);
-        }
-    }
-
-    function separatePlyHeaderAndData(plyBuffer) {
-        const header = INRIAV1PlyParser.decodeHeaderFromBuffer(plyBuffer);
-        const splatCount = header.splatCount;
-        const splatData = INRIAV1PlyParser.findSplatData(plyBuffer, header);
-        return {
-            header,
-            splatCount,
-            splatData
-        };
-    }
-
-    const CodeBookEntryNamesToRead = [
-        'features_dc', 'features_rest_0', 'features_rest_1', 'features_rest_2', 'features_rest_3', 'features_rest_4', 'features_rest_5',
-        'features_rest_6', 'features_rest_7', 'features_rest_8', 'features_rest_9', 'features_rest_10', 'features_rest_11', 'features_rest_12',
-        'features_rest_13', 'features_rest_14', 'opacity', 'scaling', 'rotation_re', 'rotation_im'
-    ];
-    const CodeBookEntriesToReadIndexes = CodeBookEntryNamesToRead.map((e, i) => i);
-
-    const [
-            CB_FEATURES_DC, CB_FEATURES_REST_0, CB_FEATURES_REST_3, CB_OPACITY, CB_SCALING, CB_ROTATION_RE, CB_ROTATION_IM
-          ] = [0, 1, 4, 16, 17, 18, 19];
-
-    const FieldNamesToRead = ['scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3',
-                              'x', 'y', 'z', 'f_dc_0', 'f_dc_1', 'f_dc_2', 'opacity', 'red', 'green', 'blue',
-                              'f_rest_0', 'f_rest_1', 'f_rest_2', 'f_rest_3', 'f_rest_4', 'f_rest_5', 'f_rest_6', 'f_rest_7', 'f_rest_8',
-                              'f_rest_9', 'f_rest_10', 'f_rest_11', 'f_rest_12', 'f_rest_13', 'f_rest_14', 'f_rest_15', 'f_rest_16',
-                              'f_rest_17', 'f_rest_18', 'f_rest_19', 'f_rest_20', 'f_rest_21', 'f_rest_22', 'f_rest_23', 'f_rest_24',
-                              'f_rest_25', 'f_rest_26', 'f_rest_27', 'f_rest_28', 'f_rest_29', 'f_rest_30', 'f_rest_31', 'f_rest_32',
-                              'f_rest_33', 'f_rest_34', 'f_rest_35', 'f_rest_36', 'f_rest_37', 'f_rest_38', 'f_rest_39', 'f_rest_40',
-                              'f_rest_41', 'f_rest_42', 'f_rest_43', 'f_rest_44', 'f_rest_45'
-                             ];
-    const FieldsToReadIndexes = FieldNamesToRead.map((e, i) => i);
-
-    const [
-            PLY_SCALE_0, PLY_SCALE_1, PLY_SCALE_2, PLY_ROT_0, PLY_ROT_1, PLY_ROT_2, PLY_ROT_3, PLY_X, PLY_Y, PLY_Z,
-            PLY_F_DC_0, PLY_F_DC_1, PLY_F_DC_2, PLY_OPACITY,
-          ] = FieldsToReadIndexes;
-
-    const PLY_RED = PLY_F_DC_0;
-    const PLY_GREEN = PLY_F_DC_1;
-    const PLY_BLUE = PLY_F_DC_2;
-
-    const fromHalfFloat = (hf) =>{
-        const t = (31744 & hf) >> 10;
-        const a = 1023 & hf;
-        return (hf >> 15 ? -1 : 1)*(t ? t === 31 ? a ? NaN : 1/0 : Math.pow(2, t - 15) *( 1 + a / 1024) : a / 1024*6103515625e-14);
-    };
-
-    class INRIAV2PlyParser {
-
-        static decodeSectionHeadersFromHeaderLines(headerLines) {
-            const fieldNameIdMap = FieldsToReadIndexes.reduce((acc, element) => {
-                acc[FieldNamesToRead[element]] = element;
-                return acc;
-            }, {});
-
-            const codeBookEntriesToReadIdMap = CodeBookEntriesToReadIndexes.reduce((acc, element) => {
-                acc[CodeBookEntryNamesToRead[element]] = element;
-                return acc;
-            }, {});
-
-            const sectionNames = PlyParserUtils.getHeaderSectionNames(headerLines);
-            let codeBookSectionIndex;
-            for (let s = 0; s < sectionNames.length; s++) {
-                const sectionName = sectionNames[s];
-                if (sectionName === 'codebook_centers') {
-                    codeBookSectionIndex = s;
-                }
-            }
-
-            let currentStartLine = 0;
-            let lastSectionFound = false;
-            const sectionHeaders = [];
-            let sectionIndex = 0;
-            while (!lastSectionFound) {
-                let sectionHeader;
-                if (sectionIndex === codeBookSectionIndex) {
-                    sectionHeader = PlyParserUtils.decodeSectionHeader(headerLines, codeBookEntriesToReadIdMap, currentStartLine);
-                } else {
-                    sectionHeader = PlyParserUtils.decodeSectionHeader(headerLines, fieldNameIdMap, currentStartLine);
-                }
-                lastSectionFound = sectionHeader.endOfHeader;
-                currentStartLine = sectionHeader.headerEndLine + 1;
-                if (!lastSectionFound) {
-                    sectionHeader.splatCount = sectionHeader.vertexCount;
-                    sectionHeader.bytesPerSplat = sectionHeader.bytesPerVertex;
-                }
-                sectionHeaders.push(sectionHeader);
-                sectionIndex++;
-            }
-            return sectionHeaders;
-        }
-
-        static decodeSectionHeadersFromHeaderText(headerText) {
-            const headerLines = PlyParserUtils.convertHeaderTextToLines(headerText);
-            return INRIAV2PlyParser.decodeSectionHeadersFromHeaderLines(headerLines);
-        }
-
-        static getSplatCountFromSectionHeaders(sectionHeaders) {
-            let splatCount = 0;
-            for (let sectionHeader of sectionHeaders) {
-                if (sectionHeader.sectionName !== 'codebook_centers') {
-                    splatCount += sectionHeader.vertexCount;
-                }
-            }
-            return splatCount;
-        }
-
-        static decodeHeaderFromHeaderText(headerText) {
-            const headerSizeBytes = headerText.indexOf(PlyParserUtils.HeaderEndToken) + PlyParserUtils.HeaderEndToken.length + 1;
-            const sectionHeaders = INRIAV2PlyParser.decodeSectionHeadersFromHeaderText(headerText);
-            const splatCount = INRIAV2PlyParser.getSplatCountFromSectionHeaders(sectionHeaders);
-            return {
-                'headerSizeBytes': headerSizeBytes,
-                'sectionHeaders': sectionHeaders,
-                'splatCount': splatCount
-            };
-        }
-
-        static decodeHeaderFromBuffer(plyBuffer) {
-            const headerText = PlyParserUtils.readHeaderFromBuffer(plyBuffer);
-            return INRIAV2PlyParser.decodeHeaderFromHeaderText(headerText);
-        }
-
-        static findVertexData(plyBuffer, header, targetSection) {
-            let byteOffset = header.headerSizeBytes;
-            for (let s = 0; s < targetSection && s < header.sectionHeaders.length; s++) {
-                const sectionHeader = header.sectionHeaders[s];
-                byteOffset += sectionHeader.dataSizeBytes;
-            }
-            return new DataView(plyBuffer, byteOffset, header.sectionHeaders[targetSection].dataSizeBytes);
-        }
-
-        static decodeCodeBook(codeBookData, sectionHeader) {
-
-            const rawVertex = [];
-            const codeBook = [];
-            for (let row = 0; row < sectionHeader.vertexCount; row++) {
-                PlyParserUtils.readVertex(codeBookData, sectionHeader, row, 0, CodeBookEntriesToReadIndexes, rawVertex);
-                for (let index of CodeBookEntriesToReadIndexes) {
-                    const codeBookElementOffset = CodeBookEntriesToReadIndexes[index];
-                    let codeBookPage = codeBook[codeBookElementOffset];
-                    if (!codeBookPage) {
-                        codeBook[codeBookElementOffset] = codeBookPage = [];
-                    }
-                    codeBookPage.push(rawVertex[index]);
-                }
-            }
-            for (let page = 0; page < codeBook.length; page++) {
-                const codeBookPage = codeBook[page];
-                const SH_C0 = 0.28209479177387814;
-                for (let i = 0; i < codeBookPage.length; i++) {
-                   const baseValue = fromHalfFloat(codeBookPage[i]);
-                    if (page === CB_OPACITY) {
-                        codeBookPage[i] = Math.round((1 / (1 + Math.exp(-baseValue))) * 255);
-                    } else if (page === CB_FEATURES_DC) {
-                        codeBookPage[i] = Math.round((0.5 + SH_C0 * baseValue) * 255);
-                    } else if (page === CB_SCALING) {
-                        codeBookPage[i] = Math.exp(baseValue);
                     } else {
-                        codeBookPage[i] = baseValue;
-                    }
-                }
-            }
-            return codeBook;
-        }
-
-        static decodeSectionSplatData(sectionSplatData, splatCount, sectionHeader, codeBook, outSphericalHarmonicsDegree) {
-            outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, sectionHeader.sphericalHarmonicsDegree);
-            const splatArray = new UncompressedSplatArray(outSphericalHarmonicsDegree);
-            for (let row = 0; row < splatCount; row++) {
-                const newSplat = INRIAV2PlyParser.parseToUncompressedSplat(sectionSplatData, row, sectionHeader, codeBook,
-                                                                           0, outSphericalHarmonicsDegree);
-                splatArray.addSplat(newSplat);
-            }
-            return splatArray;
-        }
-
-        static parseToUncompressedSplat = function() {
-
-            let rawSplat = [];
-            const tempRotation = new THREE__namespace.Quaternion();
-
-            const OFFSET_X = UncompressedSplatArray.OFFSET.X;
-            const OFFSET_Y = UncompressedSplatArray.OFFSET.Y;
-            const OFFSET_Z = UncompressedSplatArray.OFFSET.Z;
-
-            const OFFSET_SCALE0 = UncompressedSplatArray.OFFSET.SCALE0;
-            const OFFSET_SCALE1 = UncompressedSplatArray.OFFSET.SCALE1;
-            const OFFSET_SCALE2 = UncompressedSplatArray.OFFSET.SCALE2;
-
-            const OFFSET_ROTATION0 = UncompressedSplatArray.OFFSET.ROTATION0;
-            const OFFSET_ROTATION1 = UncompressedSplatArray.OFFSET.ROTATION1;
-            const OFFSET_ROTATION2 = UncompressedSplatArray.OFFSET.ROTATION2;
-            const OFFSET_ROTATION3 = UncompressedSplatArray.OFFSET.ROTATION3;
-
-            const OFFSET_FDC0 = UncompressedSplatArray.OFFSET.FDC0;
-            const OFFSET_FDC1 = UncompressedSplatArray.OFFSET.FDC1;
-            const OFFSET_FDC2 = UncompressedSplatArray.OFFSET.FDC2;
-            const OFFSET_OPACITY = UncompressedSplatArray.OFFSET.OPACITY;
-
-            const OFFSET_FRC = [];
-
-            for (let i = 0; i < 45; i++) {
-                OFFSET_FRC[i] = UncompressedSplatArray.OFFSET.FRC0 + i;
-            }
-
-            return function(splatData, row, header, codeBook, splatDataOffset = 0, outSphericalHarmonicsDegree = 0) {
-                outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, header.sphericalHarmonicsDegree);
-                INRIAV2PlyParser.readSplat(splatData, header, row, splatDataOffset, rawSplat);
-                const newSplat = UncompressedSplatArray.createSplat(outSphericalHarmonicsDegree);
-                if (rawSplat[PLY_SCALE_0] !== undefined) {
-                    newSplat[OFFSET_SCALE0] = codeBook[CB_SCALING][rawSplat[PLY_SCALE_0]];
-                    newSplat[OFFSET_SCALE1] = codeBook[CB_SCALING][rawSplat[PLY_SCALE_1]];
-                    newSplat[OFFSET_SCALE2] = codeBook[CB_SCALING][rawSplat[PLY_SCALE_2]];
-                } else {
-                    newSplat[OFFSET_SCALE0] = 0.01;
-                    newSplat[OFFSET_SCALE1] = 0.01;
-                    newSplat[OFFSET_SCALE2] = 0.01;
-                }
-
-                if (rawSplat[PLY_F_DC_0] !== undefined) {
-                    newSplat[OFFSET_FDC0] = codeBook[CB_FEATURES_DC][rawSplat[PLY_F_DC_0]];
-                    newSplat[OFFSET_FDC1] = codeBook[CB_FEATURES_DC][rawSplat[PLY_F_DC_1]];
-                    newSplat[OFFSET_FDC2] = codeBook[CB_FEATURES_DC][rawSplat[PLY_F_DC_2]];
-                } else if (rawSplat[PLY_RED] !== undefined) {
-                    newSplat[OFFSET_FDC0] = rawSplat[PLY_RED] * 255;
-                    newSplat[OFFSET_FDC1] = rawSplat[PLY_GREEN] * 255;
-                    newSplat[OFFSET_FDC2] = rawSplat[PLY_BLUE] * 255;
-                } else {
-                    newSplat[OFFSET_FDC0] = 0;
-                    newSplat[OFFSET_FDC1] = 0;
-                    newSplat[OFFSET_FDC2] = 0;
-                }
-
-                if (rawSplat[PLY_OPACITY] !== undefined) {
-                    newSplat[OFFSET_OPACITY] = codeBook[CB_OPACITY][rawSplat[PLY_OPACITY]];
-                }
-
-                newSplat[OFFSET_FDC0] = clamp(Math.floor(newSplat[OFFSET_FDC0]), 0, 255);
-                newSplat[OFFSET_FDC1] = clamp(Math.floor(newSplat[OFFSET_FDC1]), 0, 255);
-                newSplat[OFFSET_FDC2] = clamp(Math.floor(newSplat[OFFSET_FDC2]), 0, 255);
-                newSplat[OFFSET_OPACITY] = clamp(Math.floor(newSplat[OFFSET_OPACITY]), 0, 255);
-
-                if (outSphericalHarmonicsDegree >= 1 && header.sphericalHarmonicsDegree >= 1) {
-                    for (let i = 0; i < 9; i++) {
-                        const codeBookPage = codeBook[CB_FEATURES_REST_0 + i % 3];
-                        newSplat[OFFSET_FRC[i]] = codeBookPage[rawSplat[header.sphericalHarmonicsDegree1Fields[i]]];
-                    }
-                    if (outSphericalHarmonicsDegree >= 2 && header.sphericalHarmonicsDegree >= 2) {
-                        for (let i = 0; i < 15; i++) {
-                            const codeBookPage = codeBook[CB_FEATURES_REST_3 + i % 5];
-                            newSplat[OFFSET_FRC[9 + i]] = codeBookPage[rawSplat[header.sphericalHarmonicsDegree2Fields[i]]];
-                        }
+                        newSplat[UncompressedSplatArray.OFFSET.FRC0] = 0;
+                        newSplat[UncompressedSplatArray.OFFSET.FRC1] = 0;
+                        newSplat[UncompressedSplatArray.OFFSET.FRC2] = 0;
                     }
                 }
 
-                const rot0 = codeBook[CB_ROTATION_RE][rawSplat[PLY_ROT_0]];
-                const rot1 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_1]];
-                const rot2 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_2]];
-                const rot3 = codeBook[CB_ROTATION_IM][rawSplat[PLY_ROT_3]];
-                tempRotation.set(rot0, rot1, rot2, rot3);
+                tempRotation.set(rawVertex['rot_0'], rawVertex['rot_1'], rawVertex['rot_2'], rawVertex['rot_3']);
                 tempRotation.normalize();
 
-                newSplat[OFFSET_ROTATION0] = tempRotation.x;
-                newSplat[OFFSET_ROTATION1] = tempRotation.y;
-                newSplat[OFFSET_ROTATION2] = tempRotation.z;
-                newSplat[OFFSET_ROTATION3] = tempRotation.w;
+                newSplat[UncompressedSplatArray.OFFSET.ROTATION0] = tempRotation.x;
+                newSplat[UncompressedSplatArray.OFFSET.ROTATION1] = tempRotation.y;
+                newSplat[UncompressedSplatArray.OFFSET.ROTATION2] = tempRotation.z;
+                newSplat[UncompressedSplatArray.OFFSET.ROTATION3] = tempRotation.w;
 
-                newSplat[OFFSET_X] = fromHalfFloat(rawSplat[PLY_X]);
-                newSplat[OFFSET_Y] = fromHalfFloat(rawSplat[PLY_Y]);
-                newSplat[OFFSET_Z] = fromHalfFloat(rawSplat[PLY_Z]);
+                newSplat[UncompressedSplatArray.OFFSET.X] = rawVertex['x'];
+                newSplat[UncompressedSplatArray.OFFSET.Y] = rawVertex['y'];
+                newSplat[UncompressedSplatArray.OFFSET.Z] = rawVertex['z'];
 
                 return newSplat;
             };
 
         }();
 
-        static readSplat(splatData, header, row, dataOffset, rawSplat) {
-            return PlyParserUtils.readVertex(splatData, header, row, dataOffset, FieldsToReadIndexes, rawSplat, false);
-        }
-
         static parseToUncompressedSplatArray(plyBuffer, outSphericalHarmonicsDegree = 0) {
-            const splatArrays = [];
-            const header = INRIAV2PlyParser.decodeHeaderFromBuffer(plyBuffer, outSphericalHarmonicsDegree);
-            let codeBook;
 
-            for (let s = 0; s < header.sectionHeaders.length; s++) {
-                const sectionHeader = header.sectionHeaders[s];
-                if (sectionHeader.sectionName === 'codebook_centers') {
-                    const codeBookData = INRIAV2PlyParser.findVertexData(plyBuffer, header, s);
-                    codeBook = INRIAV2PlyParser.decodeCodeBook(codeBookData, sectionHeader);
+            const header = PlyParser.decodeHeadeFromBuffer(plyBuffer);
+
+            if (header.compressed) {
+
+                return CompressedPlyParser.parseToUncompressedSplatArray(plyBuffer);
+
+            } else {
+
+                const splatCount = header.splatCount;
+
+                const vertexData = PlyParser.findVertexData(plyBuffer, header);
+
+                // TODO: Eventually properly support multiple degree spherical harmonics
+                // figure out the SH degree from the number of coefficients
+                /* let nRestCoeffs = 0;
+                for (const propertyName in header.propertyTypes) {
+                    if (propertyName.startsWith('f_rest_')) {
+                        nRestCoeffs += 1;
+                    }
                 }
-            }
-            for (let s = 0; s < header.sectionHeaders.length; s++) {
-                const sectionHeader = header.sectionHeaders[s];
-                if (sectionHeader.sectionName !== 'codebook_centers') {
-                    const splatCount = sectionHeader.vertexCount;
-                    const vertexData = INRIAV2PlyParser.findVertexData(plyBuffer, header, s);
-                    const splatArray = INRIAV2PlyParser.decodeSectionSplatData(vertexData, splatCount, sectionHeader,
-                                                                   codeBook, outSphericalHarmonicsDegree);
-                    splatArrays.push(splatArray);
+                const nCoeffsPerColor = nRestCoeffs / 3;*/
+
+                // const sphericalHarmonicsDegree = Math.sqrt(nCoeffsPerColor + 1) - 1;
+                // const sphericalHarmonicsDegree = 0;
+                // console.log('Detected degree', sphericalHarmonicsDegree, 'with ', nCoeffsPerColor, 'coefficients per color');
+
+                // figure out the order in which spherical harmonics should be read
+                /* const shFeatureOrder = [];
+                for (let rgb = 0; rgb < 3; ++rgb) {
+                    shFeatureOrder.push(`f_dc_${rgb}`);
                 }
-            }
+                for (let i = 0; i < nCoeffsPerColor; ++i) {
+                    for (let rgb = 0; rgb < 3; ++rgb) {
+                        shFeatureOrder.push(`f_rest_${rgb * nCoeffsPerColor + i}`);
+                    }
+                }*/
 
-            const unified = new UncompressedSplatArray(outSphericalHarmonicsDegree);
-            for (let splatArray of splatArrays) {
-                for (let splat of splatArray.splats) {
-                    unified.addSplat(splat);
+                const splatArray = new UncompressedSplatArray(outSphericalHarmonicsDegree);
+
+                for (let row = 0; row < splatCount; row++) {
+                    const newSplat = PlyParser.parseToUncompressedSplat(vertexData, row, header, 0, outSphericalHarmonicsDegree);
+                    splatArray.addSplat(newSplat);
                 }
-            }
 
-            return unified;
-        }
-    }
-
-    class PlyParser {
-
-        static parseToUncompressedSplatArray(plyBuffer, outSphericalHarmonicsDegree = 0) {
-            const plyFormat = PlyParserUtils.determineHeaderFormatFromPlyBuffer(plyBuffer);
-            if (plyFormat === PlyFormat.PlayCanvasCompressed) {
-                return PlayCanvasCompressedPlyParser.parseToUncompressedSplatArray(plyBuffer, outSphericalHarmonicsDegree);
-            } else if (plyFormat === PlyFormat.INRIAV1) {
-                return INRIAV1PlyParser.parseToUncompressedSplatArray(plyBuffer, outSphericalHarmonicsDegree);
-            } else if (plyFormat === PlyFormat.INRIAV2) {
-                return INRIAV2PlyParser.parseToUncompressedSplatArray(plyBuffer, outSphericalHarmonicsDegree);
-            }
-        }
-
-        static parseToUncompressedSplatBuffer(plyBuffer, outSphericalHarmonicsDegree = 0) {
-            const plyFormat = PlyParserUtils.determineHeaderFormatFromPlyBuffer(plyBuffer);
-            if (plyFormat === PlyFormat.PlayCanvasCompressed) {
-                return PlayCanvasCompressedPlyParser.parseToUncompressedSplatBuffer(plyBuffer, outSphericalHarmonicsDegree);
-            } else if (plyFormat === PlyFormat.INRIAV1) {
-                return INRIAV1PlyParser.parseToUncompressedSplatBuffer(plyBuffer, outSphericalHarmonicsDegree);
-            } else if (plyFormat === PlyFormat.INRIAV2) {
-                 // TODO: Implement!
-                throw new Error('parseToUncompressedSplatBuffer() is not implemented for INRIA V2 PLY files');
+                return splatArray;
             }
         }
 
@@ -3362,7 +2381,7 @@
                 const sectionFilter = sectionFilters[s];
                 for (let i = 0; i < splatArray.splatCount; i++) {
                     if (sectionFilter(i)) {
-                        sectionSplats.addSplat(splatArray.splats[i]);
+                        sectionSplats.addSplatFromArray(splatArray, i);
                     }
                 }
                 newArrays.push(sectionSplats);
@@ -3375,30 +2394,29 @@
 
         static getStandardPartitioner(partitionSize = 0, sceneCenter = new THREE__namespace.Vector3(),
                                       blockSize = SplatBuffer.BucketBlockSize, bucketSize = SplatBuffer.BucketSize) {
-
             const partitionGenerator = (splatArray) => {
-
-                const OFFSET_X = UncompressedSplatArray.OFFSET.X;
-                const OFFSET_Y = UncompressedSplatArray.OFFSET.Y;
-                const OFFSET_Z = UncompressedSplatArray.OFFSET.Z;
 
                 if (partitionSize <= 0) partitionSize = splatArray.splatCount;
 
-                const center = new THREE__namespace.Vector3();
+                const centerA = new THREE__namespace.Vector3();
+                const centerB = new THREE__namespace.Vector3();
                 const clampDistance = 0.5;
                 const clampPoint = (point) => {
                     point.x = Math.floor(point.x / clampDistance) * clampDistance;
                     point.y = Math.floor(point.y / clampDistance) * clampDistance;
                     point.z = Math.floor(point.z / clampDistance) * clampDistance;
                 };
-                splatArray.splats.forEach((splat) => {
-                    center.set(splat[OFFSET_X], splat[OFFSET_Y], splat[OFFSET_Z]).sub(sceneCenter);
-                    clampPoint(center);
-                    splat.centerDist = center.lengthSq();
-                });
                 splatArray.splats.sort((a, b) => {
-                    let centerADist = a.centerDist;
-                    let centerBDist = b.centerDist;
+                    centerA.set(a[UncompressedSplatArray.OFFSET.X],
+                                a[UncompressedSplatArray.OFFSET.Y],
+                                a[UncompressedSplatArray.OFFSET.Z]).sub(sceneCenter);
+                    clampPoint(centerA);
+                    const centerADist = centerA.lengthSq();
+                    centerB.set(b[UncompressedSplatArray.OFFSET.X],
+                                b[UncompressedSplatArray.OFFSET.Y],
+                                b[UncompressedSplatArray.OFFSET.Z]).sub(sceneCenter);
+                    clampPoint(centerB);
+                    const centerBDist = centerB.lengthSq();
                     if (centerADist > centerBDist) return 1;
                     else return -1;
                 });
@@ -3463,20 +2481,6 @@
         'Done': 2
     };
 
-    class DirectLoadError extends Error {
-
-        constructor(msg) {
-            super(msg);
-        }
-
-    }
-
-    const InternalLoadType = {
-        ProgressiveToSplatBuffer: 0,
-        ProgressiveToSplatArray: 1,
-        DownloadBeforeProcessing: 2
-    };
-
     function storeChunksInBuffer(chunks, buffer) {
         let inBytes = 0;
         for (let chunk of chunks) inBytes += chunk.sizeBytes;
@@ -3494,730 +2498,195 @@
         return buffer;
     }
 
-    function finalize$1(splatData, optimizeSplatData, minimumAlpha, compressionLevel, sectionSize, sceneCenter, blockSize, bucketSize) {
-        if (optimizeSplatData) {
-            const splatBufferGenerator = SplatBufferGenerator.getStandardGenerator(minimumAlpha, compressionLevel,
-                                                                                   sectionSize, sceneCenter,
-                                                                                   blockSize, bucketSize);
-            return splatBufferGenerator.generateFromUncompressedSplatArray(splatData);
-        } else {
-            return SplatBuffer.generateFromUncompressedSplatArrays([splatData], minimumAlpha, 0, new THREE__namespace.Vector3());
-        }
-    }
-
     class PlyLoader {
 
-        static loadFromURL(fileName, onProgress, progressiveLoadToSplatBuffer, onProgressiveLoadSectionProgress,
-                           minimumAlpha, compressionLevel, optimizeSplatData = true, outSphericalHarmonicsDegree = 0,
-                           headers, sectionSize, sceneCenter, blockSize, bucketSize) {
+        static loadFromURL(fileName, onProgress, streamLoadData, onStreamedSectionProgress, minimumAlpha, compressionLevel,
+                           outSphericalHarmonicsDegree = 0, sectionSize, sceneCenter, blockSize, bucketSize) {
 
-            let internalLoadType;
-            if (!progressiveLoadToSplatBuffer && !optimizeSplatData) {
-                internalLoadType = InternalLoadType.DownloadBeforeProcessing;
-            } else {
-                if (optimizeSplatData) internalLoadType = InternalLoadType.ProgressiveToSplatArray;
-                else internalLoadType = InternalLoadType.ProgressiveToSplatBuffer;
-            }
-
-            const directLoadSectionSizeBytes = Constants.ProgressiveLoadSectionSize;
-            const splatBufferDataOffsetBytes = SplatBuffer.HeaderSizeBytes + SplatBuffer.SectionHeaderSizeBytes;
+            const streamedSectionSizeBytes = Constants.StreamingSectionSize;
+            const splatDataOffsetBytes = SplatBuffer.HeaderSizeBytes + SplatBuffer.SectionHeaderSizeBytes;
             const sectionCount = 1;
 
-            let plyFormat;
-            let directLoadBufferIn;
-            let directLoadBufferOut;
-            let directLoadSplatBuffer;
+            let streamBufferIn;
+            let streamBufferOut;
+            let streamedSplatBuffer;
             let compressedPlyHeaderChunksBuffer;
             let maxSplatCount = 0;
-            let processedBaseSplatCount = 0;
-            let processedSphericalHarmonicsSplatCount = 0;
+            let splatCount = 0;
 
             let headerLoaded = false;
             let readyToLoadSplatData = false;
-            let baseSplatDataLoaded = false;
+            let compressed = false;
 
-            const loadPromise = nativePromiseWithExtractedComponents();
+            let streamLoadCompleteResolver;
+            let streamLoadPromise = new Promise((resolve) => {
+                streamLoadCompleteResolver = resolve;
+            });
 
             let numBytesStreamed = 0;
             let numBytesParsed = 0;
             let numBytesDownloaded = 0;
-            let endOfBaseSplatDataBytes = 0;
             let headerText = '';
             let header = null;
             let chunks = [];
-
-            let standardLoadUncompressedSplatArray;
 
             const textDecoder = new TextDecoder();
 
             const localOnProgress = (percent, percentLabel, chunkData) => {
                 const loadComplete = percent >= 100;
+                if (streamLoadData) {
 
-                if (chunkData) {
-                    chunks.push({
-                        'data': chunkData,
-                        'sizeBytes': chunkData.byteLength,
-                        'startBytes': numBytesDownloaded,
-                        'endBytes': numBytesDownloaded + chunkData.byteLength
-                    });
-                    numBytesDownloaded += chunkData.byteLength;
-                }
-
-                if (internalLoadType === InternalLoadType.DownloadBeforeProcessing) {
-                    if (loadComplete) {
-                        loadPromise.resolve(chunks);
+                    if (chunkData) {
+                        chunks.push({
+                            'data': chunkData,
+                            'sizeBytes': chunkData.byteLength,
+                            'startBytes': numBytesDownloaded,
+                            'endBytes': numBytesDownloaded + chunkData.byteLength
+                        });
+                        numBytesDownloaded += chunkData.byteLength;
                     }
-                } else {
+
                     if (!headerLoaded) {
                         headerText += textDecoder.decode(chunkData);
-                        if (PlyParserUtils.checkTextForEndHeader(headerText)) {
-                            plyFormat = PlyParserUtils.determineHeaderFormatFromHeaderText(headerText);
-                            if (plyFormat === PlyFormat.INRIAV1) {
-                                header = INRIAV1PlyParser.decodeHeaderText(headerText);
-                                outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, header.sphericalHarmonicsDegree);
+                        if (PlyParser.checkTextForEndHeader(headerText)) {
+                            header = PlyParser.decodeHeaderText(headerText);
+                            outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, header.sphericalHarmonicsDegree);
+                            compressed = header.compressed;
+
+                            if (compressed) {
+                                header = CompressedPlyParser.decodeHeaderText(headerText);
+                                maxSplatCount = header.vertexElement.count;
+                            } else {
                                 maxSplatCount = header.splatCount;
                                 readyToLoadSplatData = true;
-                                endOfBaseSplatDataBytes = header.headerSizeBytes + header.bytesPerSplat * maxSplatCount;
-                            } else if (plyFormat === PlyFormat.PlayCanvasCompressed) {
-                                header = PlayCanvasCompressedPlyParser.decodeHeaderText(headerText);
-                                outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, header.sphericalHarmonicsDegree);
-                                if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer && outSphericalHarmonicsDegree > 0) {
-                                    throw new DirectLoadError(
-                                        'PlyLoader.loadFromURL() -> Selected PLY format has spherical ' +
-                                        'harmonics data that cannot be progressively loaded.'
-                                    );
-                                }
-                                maxSplatCount = header.vertexElement.count;
-                                endOfBaseSplatDataBytes = header.headerSizeBytes + header.bytesPerSplat * maxSplatCount +
-                                                          header.chunkElement.storageSizeBytes;
-                            } else {
-                                if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                                    throw new DirectLoadError(
-                                        'PlyLoader.loadFromURL() -> Selected PLY format cannot be progressively loaded.'
-                                    );
-                                } else {
-                                    internalLoadType = InternalLoadType.DownloadBeforeProcessing;
-                                    return;
-                                }
                             }
 
-                            if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                                const shDescriptor = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[outSphericalHarmonicsDegree];
-                                const splatBufferSizeBytes = splatBufferDataOffsetBytes + shDescriptor.BytesPerSplat * maxSplatCount;
-                                directLoadBufferOut = new ArrayBuffer(splatBufferSizeBytes);
-                                SplatBuffer.writeHeaderToBuffer({
-                                    versionMajor: SplatBuffer.CurrentMajorVersion,
-                                    versionMinor: SplatBuffer.CurrentMinorVersion,
-                                    maxSectionCount: sectionCount,
-                                    sectionCount: sectionCount,
-                                    maxSplatCount: maxSplatCount,
-                                    splatCount: 0,
-                                    compressionLevel: 0,
-                                    sceneCenter: new THREE__namespace.Vector3()
-                                }, directLoadBufferOut);
-                            } else {
-                                standardLoadUncompressedSplatArray = new UncompressedSplatArray(outSphericalHarmonicsDegree);
-                            }
+                            const shDescriptor = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[outSphericalHarmonicsDegree];
+                            const splatBufferSizeBytes = splatDataOffsetBytes + shDescriptor.BytesPerSplat * maxSplatCount;
+                            streamBufferOut = new ArrayBuffer(splatBufferSizeBytes);
+                            SplatBuffer.writeHeaderToBuffer({
+                                versionMajor: SplatBuffer.CurrentMajorVersion,
+                                versionMinor: SplatBuffer.CurrentMinorVersion,
+                                maxSectionCount: sectionCount,
+                                sectionCount: sectionCount,
+                                maxSplatCount: maxSplatCount,
+                                splatCount: splatCount,
+                                compressionLevel: 0,
+                                sceneCenter: new THREE__namespace.Vector3()
+                            }, streamBufferOut);
 
                             numBytesStreamed = header.headerSizeBytes;
                             numBytesParsed = header.headerSizeBytes;
                             headerLoaded = true;
                         }
-                    } else if (plyFormat === PlyFormat.PlayCanvasCompressed && !readyToLoadSplatData) {
+                    } else if (compressed && !readyToLoadSplatData) {
                         const sizeRequiredForHeaderAndChunks = header.headerSizeBytes + header.chunkElement.storageSizeBytes;
                         compressedPlyHeaderChunksBuffer = storeChunksInBuffer(chunks, compressedPlyHeaderChunksBuffer);
                         if (compressedPlyHeaderChunksBuffer.byteLength >= sizeRequiredForHeaderAndChunks) {
-                            PlayCanvasCompressedPlyParser.readElementData(header.chunkElement, compressedPlyHeaderChunksBuffer,
-                                                                          header.headerSizeBytes);
+                            CompressedPlyParser.readElementData(header.chunkElement, compressedPlyHeaderChunksBuffer, header.headerSizeBytes);
                             numBytesStreamed = sizeRequiredForHeaderAndChunks;
                             numBytesParsed = sizeRequiredForHeaderAndChunks;
                             readyToLoadSplatData = true;
                         }
                     }
 
-                    if (headerLoaded && readyToLoadSplatData && chunks.length > 0) {
+                    if (headerLoaded && readyToLoadSplatData) {
 
-                        directLoadBufferIn = storeChunksInBuffer(chunks, directLoadBufferIn);
+                        if (chunks.length > 0) {
 
-                        const bytesLoadedSinceLastStreamedSection = numBytesDownloaded - numBytesStreamed;
-                        if (bytesLoadedSinceLastStreamedSection > directLoadSectionSizeBytes ||
-                            (numBytesDownloaded >= endOfBaseSplatDataBytes && !baseSplatDataLoaded) ||
-                            loadComplete) {
-                            const bytesPerSplat = baseSplatDataLoaded ? header.sphericalHarmonicsPerSplat : header.bytesPerSplat;
-                            const endOfBytesToProcess = baseSplatDataLoaded ? numBytesDownloaded :
-                                                        Math.min(endOfBaseSplatDataBytes, numBytesDownloaded);
-                            const numBytesToProcess = endOfBytesToProcess - numBytesParsed;
-                            const addedSplatCount = Math.floor(numBytesToProcess / bytesPerSplat);
-                            const numBytesToParse = addedSplatCount * bytesPerSplat;
-                            const numBytesLeftOver = numBytesDownloaded - numBytesParsed - numBytesToParse;
-                            const parsedDataViewOffset = numBytesParsed - chunks[0].startBytes;
-                            const dataToParse = new DataView(directLoadBufferIn, parsedDataViewOffset, numBytesToParse);
+                            streamBufferIn = storeChunksInBuffer(chunks, streamBufferIn);
 
-                            if (!baseSplatDataLoaded) {
-                                if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                                    const shDesc = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[outSphericalHarmonicsDegree];
-                                    const outOffset = processedBaseSplatCount * shDesc.BytesPerSplat + splatBufferDataOffsetBytes;
-                                    if (plyFormat === PlyFormat.PlayCanvasCompressed) {
-                                        PlayCanvasCompressedPlyParser.parseToUncompressedSplatBufferSection(
-                                            header.chunkElement, header.vertexElement, 0, addedSplatCount - 1,
-                                            processedBaseSplatCount, dataToParse, directLoadBufferOut, outOffset
-                                        );
-                                    } else {
-                                        INRIAV1PlyParser.parseToUncompressedSplatBufferSection(
-                                            header, 0, addedSplatCount - 1, dataToParse, 0,
-                                            directLoadBufferOut, outOffset, outSphericalHarmonicsDegree
-                                        );
-                                    }
+                            const bytesLoadedSinceLastStreamedSection = numBytesDownloaded - numBytesStreamed;
+                            if (bytesLoadedSinceLastStreamedSection > streamedSectionSizeBytes || loadComplete) {
+                                const numBytesToProcess = numBytesDownloaded - numBytesParsed;
+                                const addedSplatCount = Math.floor(numBytesToProcess / header.bytesPerSplat);
+                                const numBytesToParse = addedSplatCount * header.bytesPerSplat;
+                                const numBytesLeftOver = numBytesToProcess - numBytesToParse;
+                                const newSplatCount = splatCount + addedSplatCount;
+                                const parsedDataViewOffset = numBytesParsed - chunks[0].startBytes;
+                                const dataToParse = new DataView(streamBufferIn, parsedDataViewOffset, numBytesToParse);
+
+                                const shDescriptor = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[outSphericalHarmonicsDegree];
+                                const outOffset = splatCount * shDescriptor.BytesPerSplat + splatDataOffsetBytes;
+
+                                if (compressed) {
+                                    CompressedPlyParser.parseToUncompressedSplatBufferSection(header.chunkElement, header.vertexElement, 0,
+                                                                                              addedSplatCount - 1, splatCount,
+                                                                                              dataToParse, 0, streamBufferOut, outOffset);
                                 } else {
-                                    if (plyFormat === PlyFormat.PlayCanvasCompressed) {
-                                        PlayCanvasCompressedPlyParser.parseToUncompressedSplatArraySection(
-                                            header.chunkElement, header.vertexElement, 0, addedSplatCount - 1,
-                                            processedBaseSplatCount, dataToParse, standardLoadUncompressedSplatArray
-                                        );
-                                    } else {
-                                        INRIAV1PlyParser.parseToUncompressedSplatArraySection(
-                                            header, 0, addedSplatCount - 1, dataToParse, 0,
-                                            standardLoadUncompressedSplatArray, outSphericalHarmonicsDegree
-                                        );
-                                    }
+                                    PlyParser.parseToUncompressedSplatBufferSection(header, 0, addedSplatCount - 1, dataToParse, 0,
+                                                                                    streamBufferOut, outOffset, outSphericalHarmonicsDegree);
                                 }
 
-                                processedBaseSplatCount += addedSplatCount;
+                                splatCount = newSplatCount;
+                                if (!streamedSplatBuffer) {
+                                    SplatBuffer.writeSectionHeaderToBuffer({
+                                        maxSplatCount: maxSplatCount,
+                                        splatCount: splatCount,
+                                        bucketSize: 0,
+                                        bucketCount: 0,
+                                        bucketBlockSize: 0,
+                                        compressionScaleRange: 0,
+                                        storageSizeBytes: 0,
+                                        fullBucketCount: 0,
+                                        partiallyFilledBucketCount: 0,
+                                        sphericalHarmonicsDegree: outSphericalHarmonicsDegree
+                                    }, 0, streamBufferOut, SplatBuffer.HeaderSizeBytes);
+                                    streamedSplatBuffer = new SplatBuffer(streamBufferOut, false);
+                                }
+                                streamedSplatBuffer.updateLoadedCounts(1, splatCount);
+                                onStreamedSectionProgress(streamedSplatBuffer, loadComplete);
+                                numBytesStreamed += streamedSectionSizeBytes;
+                                numBytesParsed += numBytesToParse;
 
-                                if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                                    if (!directLoadSplatBuffer) {
-                                        SplatBuffer.writeSectionHeaderToBuffer({
-                                            maxSplatCount: maxSplatCount,
-                                            splatCount: processedBaseSplatCount,
-                                            bucketSize: 0,
-                                            bucketCount: 0,
-                                            bucketBlockSize: 0,
-                                            compressionScaleRange: 0,
-                                            storageSizeBytes: 0,
-                                            fullBucketCount: 0,
-                                            partiallyFilledBucketCount: 0,
-                                            sphericalHarmonicsDegree: outSphericalHarmonicsDegree
-                                        }, 0, directLoadBufferOut, SplatBuffer.HeaderSizeBytes);
-                                        directLoadSplatBuffer = new SplatBuffer(directLoadBufferOut, false);
+                                if (numBytesLeftOver === 0) {
+                                    chunks = [];
+                                } else {
+                                    let keepChunks = [];
+                                    let keepSize = 0;
+                                    for (let i = chunks.length - 1; i >= 0; i--) {
+                                        const chunk = chunks[i];
+                                        keepSize += chunk.sizeBytes;
+                                        keepChunks.unshift(chunk);
+                                        if (keepSize >= numBytesLeftOver) break;
                                     }
-                                    directLoadSplatBuffer.updateLoadedCounts(1, processedBaseSplatCount);
-                                }
-                                if (numBytesDownloaded >= endOfBaseSplatDataBytes) {
-                                    baseSplatDataLoaded = true;
-                                }
-                            } else {
-                                if (plyFormat === PlyFormat.PlayCanvasCompressed) {
-                                    if (internalLoadType === InternalLoadType.ProgressiveToSplatArray) {
-                                        PlayCanvasCompressedPlyParser.parseSphericalHarmonicsToUncompressedSplatArraySection(
-                                            header.chunkElement, header.shElement, processedSphericalHarmonicsSplatCount,
-                                            processedSphericalHarmonicsSplatCount + addedSplatCount - 1,
-                                            dataToParse, 0, outSphericalHarmonicsDegree, header.sphericalHarmonicsDegree,
-                                            standardLoadUncompressedSplatArray
-                                        );
-                                        processedSphericalHarmonicsSplatCount += addedSplatCount;
-                                    }
+                                    chunks = keepChunks;
                                 }
                             }
+                        }
 
-                            if (numBytesLeftOver === 0) {
-                                chunks = [];
-                            } else {
-                                let keepChunks = [];
-                                let keepSize = 0;
-                                for (let i = chunks.length - 1; i >= 0; i--) {
-                                    const chunk = chunks[i];
-                                    keepSize += chunk.sizeBytes;
-                                    keepChunks.unshift(chunk);
-                                    if (keepSize >= numBytesLeftOver) break;
-                                }
-                                chunks = keepChunks;
-                            }
-
-                            numBytesStreamed += directLoadSectionSizeBytes;
-                            numBytesParsed += numBytesToParse;
+                        if (loadComplete) {
+                            streamLoadCompleteResolver(streamedSplatBuffer);
                         }
                     }
 
-                    if (onProgressiveLoadSectionProgress && directLoadSplatBuffer) {
-                        onProgressiveLoadSectionProgress(directLoadSplatBuffer, loadComplete);
-                    }
-
-                    if (loadComplete) {
-                        if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                            loadPromise.resolve(directLoadSplatBuffer);
-                        } else {
-                            loadPromise.resolve(standardLoadUncompressedSplatArray);
-                        }
-                    }
                 }
-
                 if (onProgress) onProgress(percent, percentLabel, LoaderStatus.Downloading);
             };
 
-            if (onProgress) onProgress(0, '0%', LoaderStatus.Downloading);
-            return fetchWithProgress(fileName, localOnProgress, false, headers).then(() => {
+            return fetchWithProgress(fileName, localOnProgress, !streamLoadData).then((plyFileData) => {
                 if (onProgress) onProgress(0, '0%', LoaderStatus.Processing);
-                return loadPromise.promise.then((splatData) => {
+                const loadPromise = streamLoadData ? streamLoadPromise :
+                                    PlyLoader.loadFromFileData(plyFileData, minimumAlpha, compressionLevel, outSphericalHarmonicsDegree,
+                                                               sectionSize, sceneCenter, blockSize, bucketSize);
+                return loadPromise.then((splatBuffer) => {
                     if (onProgress) onProgress(100, '100%', LoaderStatus.Done);
-                    if (internalLoadType === InternalLoadType.DownloadBeforeProcessing) {
-                        const chunkDatas = chunks.map((chunk) => chunk.data);
-                        return new Blob(chunkDatas).arrayBuffer().then((plyFileData) => {
-                            return PlyLoader.loadFromFileData(plyFileData, minimumAlpha, compressionLevel, optimizeSplatData,
-                                                              outSphericalHarmonicsDegree, sectionSize, sceneCenter, blockSize, bucketSize);
-                        });
-                    } else if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                        return splatData;
-                    } else {
-                        return delayedExecute(() => {
-                            return finalize$1(splatData, optimizeSplatData, minimumAlpha, compressionLevel,
-                                            sectionSize, sceneCenter, blockSize, bucketSize);
-                        });
-                    }
+                    return splatBuffer;
                 });
             });
         }
 
-        static loadFromFileData(plyFileData, minimumAlpha, compressionLevel, optimizeSplatData, outSphericalHarmonicsDegree = 0,
+        static loadFromFileData(plyFileData, minimumAlpha, compressionLevel, outSphericalHarmonicsDegree = 0,
                                 sectionSize, sceneCenter, blockSize, bucketSize) {
-            if (optimizeSplatData) {
-                return delayedExecute(() => {
-                    return PlyParser.parseToUncompressedSplatArray(plyFileData, outSphericalHarmonicsDegree);
-                })
-                .then((splatArray) => {
-                    return finalize$1(splatArray, optimizeSplatData, minimumAlpha, compressionLevel,
-                                    sectionSize, sceneCenter, blockSize, bucketSize);
-                });
-            } else {
-                return delayedExecute(() => {
-                    return PlyParser.parseToUncompressedSplatBuffer(plyFileData, outSphericalHarmonicsDegree);
-                });
-            }
-        }
-    }
-
-    const createStream = (data)=> {
-        return new ReadableStream({
-            async start(controller) {
-                controller.enqueue(data);
-                controller.close();
-            },
-        });
-    };
-
-    async function decompressGzipped(data) {
-        try {
-            const stream = createStream(data);
-            if (!stream) throw new Error('Failed to create stream from data');
-
-            return await decompressGzipStream(stream);
-        } catch (error) {
-            console.error('Error decompressing gzipped data:', error);
-            throw error;
-        }
-    }
-
-    async function decompressGzipStream(stream) {
-        const decompressedStream = stream.pipeThrough(new DecompressionStream('gzip'));
-        const response = new Response(decompressedStream);
-        const buffer = await response.arrayBuffer();
-
-        return new Uint8Array(buffer);
-    }
-
-    async function compressGzipped(data) {
-        try {
-            const stream = createStream(data);
-            const compressedStream = stream.pipeThrough(new CompressionStream('gzip'));
-            const response = new Response(compressedStream);
-            const buffer = await response.arrayBuffer();
-
-            return new Uint8Array(buffer);
-        } catch (error) {
-            console.error('Error compressing gzipped data:', error);
-            throw error;
-        }
-    }
-
-    const SPZ_MAGIC = 1347635022;
-    const FLAG_ANTIALIASED = 1;
-    const COLOR_SCALE = 0.15;
-
-    function halfToFloat(h) {
-        const sgn = (h >> 15) & 0x1;
-        const exponent = (h >> 10) & 0x1f;
-        const mantissa = h & 0x3ff;
-
-        const signMul = sgn === 1 ? -1.0 : 1.0;
-        if (exponent === 0) {
-            return signMul * Math.pow(2, -14) * mantissa / 1024;
-        }
-
-        if (exponent === 31) {
-            return mantissa !== 0 ? NaN : signMul * Infinity;
-        }
-
-        return signMul * Math.pow(2, exponent - 15) * (1 + mantissa / 1024);
-    }
-
-    function unquantizeSH(x) {
-        return (x - 128.0) / 128.0;
-    }
-
-    function dimForDegree(degree) {
-        switch (degree) {
-            case 0: return 0;
-            case 1: return 3;
-            case 2: return 8;
-            case 3: return 15;
-            default:
-                console.error(`[SPZ: ERROR] Unsupported SH degree: ${degree}`);
-                return 0;
-        }
-    }
-
-    const unpackedSplatToUncompressedSplat = function() {
-
-        let rawSplat = [];
-        const tempRotation = new THREE__namespace.Quaternion();
-
-        const OFFSET_X = UncompressedSplatArray.OFFSET.X;
-        const OFFSET_Y = UncompressedSplatArray.OFFSET.Y;
-        const OFFSET_Z = UncompressedSplatArray.OFFSET.Z;
-
-        const OFFSET_SCALE0 = UncompressedSplatArray.OFFSET.SCALE0;
-        const OFFSET_SCALE1 = UncompressedSplatArray.OFFSET.SCALE1;
-        const OFFSET_SCALE2 = UncompressedSplatArray.OFFSET.SCALE2;
-
-        const OFFSET_ROTATION0 = UncompressedSplatArray.OFFSET.ROTATION0;
-        const OFFSET_ROTATION1 = UncompressedSplatArray.OFFSET.ROTATION1;
-        const OFFSET_ROTATION2 = UncompressedSplatArray.OFFSET.ROTATION2;
-        const OFFSET_ROTATION3 = UncompressedSplatArray.OFFSET.ROTATION3;
-
-        const OFFSET_FDC0 = UncompressedSplatArray.OFFSET.FDC0;
-        const OFFSET_FDC1 = UncompressedSplatArray.OFFSET.FDC1;
-        const OFFSET_FDC2 = UncompressedSplatArray.OFFSET.FDC2;
-        const OFFSET_OPACITY = UncompressedSplatArray.OFFSET.OPACITY;
-
-        const OFFSET_FRC = [];
-
-        for (let i = 0; i < 45; i++) {
-            OFFSET_FRC[i] = UncompressedSplatArray.OFFSET.FRC0 + i;
-        }
-
-        const shCoeffMap = [dimForDegree(0), dimForDegree(1), dimForDegree(2), dimForDegree(3)];
-
-        const shIndexMap = [
-            0, 1, 2, 9, 10, 11, 12, 13, 24, 25, 26, 27, 28, 29, 30,
-            3, 4, 5, 14, 15, 16, 17, 18, 31, 32, 33, 34, 35, 36, 37,
-            6, 7, 8, 19, 20, 21, 22, 23, 38, 39, 40, 41, 42, 43, 44
-        ];
-
-        return function(unpackedSplat, unpackedSphericalHarmonicsDegree, outSphericalHarmonicsDegree) {
-                        outSphericalHarmonicsDegree = Math.min(unpackedSphericalHarmonicsDegree, outSphericalHarmonicsDegree);
-
-            const newSplat = UncompressedSplatArray.createSplat(outSphericalHarmonicsDegree);
-            if (unpackedSplat.scale[0] !== undefined) {
-                newSplat[OFFSET_SCALE0] = unpackedSplat.scale[0];
-                newSplat[OFFSET_SCALE1] = unpackedSplat.scale[1];
-                newSplat[OFFSET_SCALE2] = unpackedSplat.scale[2];
-            } else {
-                newSplat[OFFSET_SCALE0] = 0.01;
-                newSplat[OFFSET_SCALE1] = 0.01;
-                newSplat[OFFSET_SCALE2] = 0.01;
-            }
-
-            if (unpackedSplat.color[0] !== undefined) {
-                newSplat[OFFSET_FDC0] = unpackedSplat.color[0];
-                newSplat[OFFSET_FDC1] = unpackedSplat.color[1];
-                newSplat[OFFSET_FDC2] = unpackedSplat.color[2];
-            } else if (rawSplat[RED] !== undefined) {
-                newSplat[OFFSET_FDC0] = rawSplat[RED] * 255;
-                newSplat[OFFSET_FDC1] = rawSplat[GREEN] * 255;
-                newSplat[OFFSET_FDC2] = rawSplat[BLUE] * 255;
-            } else {
-                newSplat[OFFSET_FDC0] = 0;
-                newSplat[OFFSET_FDC1] = 0;
-                newSplat[OFFSET_FDC2] = 0;
-            }
-
-            if (unpackedSplat.alpha !== undefined) {
-                newSplat[OFFSET_OPACITY] = unpackedSplat.alpha;
-            }
-
-            newSplat[OFFSET_FDC0] = clamp(Math.floor(newSplat[OFFSET_FDC0]), 0, 255);
-            newSplat[OFFSET_FDC1] = clamp(Math.floor(newSplat[OFFSET_FDC1]), 0, 255);
-            newSplat[OFFSET_FDC2] = clamp(Math.floor(newSplat[OFFSET_FDC2]), 0, 255);
-            newSplat[OFFSET_OPACITY] = clamp(Math.floor(newSplat[OFFSET_OPACITY]), 0, 255);
-
-            let outSHCoeff = shCoeffMap[outSphericalHarmonicsDegree];
-            let readSHCoeff = shCoeffMap[unpackedSphericalHarmonicsDegree];
-            for (let j = 0; j < 3; ++j) {
-                for (let k = 0; k < 15; ++k) {
-                    const outIndex = shIndexMap[j * 15 + k];
-                    if (k < outSHCoeff && k < readSHCoeff) {
-                        newSplat[UncompressedSplatArray.OFFSET.FRC0 + outIndex] = unpackedSplat.sh[j * readSHCoeff + k];
-                    }
-                }
-            }
-
-            tempRotation.set(unpackedSplat.rotation[3], unpackedSplat.rotation[0], unpackedSplat.rotation[1], unpackedSplat.rotation[2]);
-            tempRotation.normalize();
-
-            newSplat[OFFSET_ROTATION0] = tempRotation.x;
-            newSplat[OFFSET_ROTATION1] = tempRotation.y;
-            newSplat[OFFSET_ROTATION2] = tempRotation.z;
-            newSplat[OFFSET_ROTATION3] = tempRotation.w;
-
-            newSplat[OFFSET_X] = unpackedSplat.position[0];
-            newSplat[OFFSET_Y] = unpackedSplat.position[1];
-            newSplat[OFFSET_Z] = unpackedSplat.position[2];
-
-            return newSplat;
-        };
-
-    }();
-
-    // Helper function to check sizes (matching C++ checkSizes function)
-    function checkSizes2(packed, numPoints, shDim, usesFloat16) {
-        if (packed.positions.length !== numPoints * 3 * (usesFloat16 ? 2 : 3)) return false;
-        if (packed.scales.length !== numPoints * 3) return false;
-        if (packed.rotations.length !== numPoints * 3) return false;
-        if (packed.alphas.length !== numPoints) return false;
-        if (packed.colors.length !== numPoints * 3) return false;
-        if (packed.sh.length !== numPoints * shDim * 3) return false;
-        return true;
-    }
-
-    function unpackGaussians(packed, outSphericalHarmonicsDegree, directToSplatBuffer, outTarget, outTargetOffset) {
-        outSphericalHarmonicsDegree = Math.min(outSphericalHarmonicsDegree, packed.shDegree);
-        const numPoints = packed.numPoints;
-        const shDim = dimForDegree(packed.shDegree);
-        const usesFloat16 = packed.positions.length === numPoints * 3 * 2;
-
-        // Validate sizes
-        if (!checkSizes2(packed, numPoints, shDim, usesFloat16)) {
-            return null;
-        }
-
-        const splat = {
-            position: [],
-            scale: [],
-            rotation: [],
-            alpha: undefined,
-            color: [],
-            sh: []
-        };
-
-        let halfData;
-        if (usesFloat16) {
-           halfData = new Uint16Array(packed.positions.buffer, packed.positions.byteOffset, numPoints * 3);
-        }
-        const fullPrecisionPositionScale = 1.0 / (1 << packed.fractionalBits);
-        const shCoeffPerChannelPerSplat = dimForDegree(packed.shDegree);
-        const SH_C0 = 0.28209479177387814;
-
-        for (let i = 0; i < numPoints; i++) {
-            // Splat position
-            if (usesFloat16) {
-                // Decode legacy float16 format
-                for (let j = 0; j < 3; j++) {
-                    splat.position[j] = halfToFloat(halfData[i * 3 + j]);
-                }
-            } else {
-                // Decode 24-bit fixed point coordinates
-                for (let j = 0; j < 3; j++) {
-                    const base = i * 9 + j * 3;
-                    let fixed32 = packed.positions[base];
-                    fixed32 |= packed.positions[base + 1] << 8;
-                    fixed32 |= packed.positions[base + 2] << 16;
-                    fixed32 |= (fixed32 & 0x800000) ? 0xff000000 : 0;
-                    splat.position[j] = fixed32 * fullPrecisionPositionScale;
-                }
-            }
-
-            // Splat scale
-            for (let j = 0; j < 3; j++) {
-                splat.scale[j] = Math.exp(packed.scales[i * 3 + j] / 16.0 - 10.0);
-            }
-
-            // Splat rotation
-            const r = packed.rotations.subarray(i * 3, i * 3 + 3);
-            const xyz = [
-                r[0] / 127.5 - 1.0,
-                r[1] / 127.5 - 1.0,
-                r[2] / 127.5 - 1.0
-            ];
-            splat.rotation[0] = xyz[0];
-            splat.rotation[1] = xyz[1];
-            splat.rotation[2] = xyz[2];
-            const squaredNorm = xyz[0] * xyz[0] + xyz[1] * xyz[1] + xyz[2] * xyz[2];
-            splat.rotation[3] = Math.sqrt(Math.max(0.0, 1.0 - squaredNorm));
-
-            // Splat alpha
-            // splat.alpha = invSigmoid(packed.alphas[i] / 255.0);
-            splat.alpha = Math.floor(packed.alphas[i]);
-
-            // Splat color
-            for (let j = 0; j < 3; j++) {
-                splat.color[j] = Math.floor(((((packed.colors[i * 3 + j] / 255.0) - 0.5) / COLOR_SCALE) * SH_C0 + 0.5) * 255);
-            }
-
-            // Splat spherical harmonics
-            for (let j = 0; j < 3; j++) {
-                for (let k = 0; k < shCoeffPerChannelPerSplat; k++) {
-                    splat.sh[j * shCoeffPerChannelPerSplat + k] = unquantizeSH(packed.sh[shCoeffPerChannelPerSplat * 3 * i + k * 3 + j]);
-                }
-            }
-
-            const uncompressedSplat = unpackedSplatToUncompressedSplat(splat, packed.shDegree, outSphericalHarmonicsDegree);
-            if (directToSplatBuffer) {
-                const outBytesPerSplat = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[outSphericalHarmonicsDegree].BytesPerSplat;
-                const outBase = i * outBytesPerSplat + outTargetOffset;
-                SplatBuffer.writeSplatDataToSectionBuffer(uncompressedSplat, outTarget, outBase, 0, outSphericalHarmonicsDegree);
-            } else {
-                outTarget.addSplat(uncompressedSplat);
-            }
-        }
-    }
-
-    const HEADER_SIZE = 16; // 4 + 4 + 4 + 1 + 1 + 1 + 1 bytes
-    const MAX_POINTS_TO_READ = 10000000;
-
-    function deserializePackedGaussians(buffer) {
-        const view = new DataView(buffer);
-        let offset = 0;
-
-        // Read and validate header
-        const header = {
-            magic: view.getUint32(offset, true),
-            version: view.getUint32(offset + 4, true),
-            numPoints: view.getUint32(offset + 8, true),
-            shDegree: view.getUint8(offset + 12),
-            fractionalBits: view.getUint8(offset + 13),
-            flags: view.getUint8(offset + 14),
-            reserved: view.getUint8(offset + 15)
-        };
-
-        offset += HEADER_SIZE;
-
-        // Validate header
-        if (header.magic !== SPZ_MAGIC) {
-            console.error('[SPZ ERROR] deserializePackedGaussians: header not found');
-            return null;
-        }
-        if (header.version < 1 || header.version > 2) {
-            console.error(`[SPZ ERROR] deserializePackedGaussians: version not supported: ${header.version}`);
-            return null;
-        }
-        if (header.numPoints > MAX_POINTS_TO_READ) {
-            console.error(`[SPZ ERROR] deserializePackedGaussians: Too many points: ${header.numPoints}`);
-            return null;
-        }
-        if (header.shDegree > 3) {
-            console.error(`[SPZ ERROR] deserializePackedGaussians: Unsupported SH degree: ${header.shDegree}`);
-            return null;
-        }
-
-        const numPoints = header.numPoints;
-        const shDim = dimForDegree(header.shDegree);
-        const usesFloat16 = header.version === 1;
-
-        // Initialize result object
-        const result = {
-            numPoints,
-            shDegree: header.shDegree,
-            fractionalBits: header.fractionalBits,
-            antialiased: (header.flags & FLAG_ANTIALIASED) !== 0,
-            positions: new Uint8Array(numPoints * 3 * (usesFloat16 ? 2 : 3)),
-            scales: new Uint8Array(numPoints * 3),
-            rotations: new Uint8Array(numPoints * 3),
-            alphas: new Uint8Array(numPoints),
-            colors: new Uint8Array(numPoints * 3),
-            sh: new Uint8Array(numPoints * shDim * 3)
-        };
-
-        // Read data sections
-        try {
-            const uint8View = new Uint8Array(buffer);
-            let positionsSize = result.positions.length;
-            let currentOffset = offset;
-
-            result.positions.set(uint8View.slice(currentOffset, currentOffset + positionsSize));
-            currentOffset += positionsSize;
-
-            result.alphas.set(uint8View.slice(currentOffset, currentOffset + result.alphas.length));
-            currentOffset += result.alphas.length;
-
-            result.colors.set(uint8View.slice(currentOffset, currentOffset + result.colors.length));
-            currentOffset += result.colors.length;
-
-            result.scales.set(uint8View.slice(currentOffset, currentOffset + result.scales.length));
-            currentOffset += result.scales.length;
-
-            result.rotations.set(uint8View.slice(currentOffset, currentOffset + result.rotations.length));
-            currentOffset += result.rotations.length;
-
-            result.sh.set(uint8View.slice(currentOffset, currentOffset + result.sh.length));
-
-            // Verify we read the expected amount of data
-            if (currentOffset + result.sh.length !== buffer.byteLength) {
-                console.error('[SPZ ERROR] deserializePackedGaussians: incorrect buffer size');
-                return null;
-            }
-        } catch (error) {
-            console.error('[SPZ ERROR] deserializePackedGaussians: read error', error);
-            return null;
-        }
-
-        return result;
-    }
-
-    async function loadSpzPacked(compressedData) {
-        try {
-            const decompressed = await decompressGzipped(compressedData);
-            return deserializePackedGaussians(decompressed.buffer);
-        } catch (error) {
-            console.error('[SPZ ERROR] loadSpzPacked: decompression error', error);
-            return null;
-        }
-    }
-
-    class SpzLoader {
-
-        static loadFromURL(fileName, onProgress, minimumAlpha, compressionLevel, optimizeSplatData = true,
-                           outSphericalHarmonicsDegree = 0, headers, sectionSize, sceneCenter, blockSize, bucketSize) {
-            if (onProgress) onProgress(0, '0%', LoaderStatus.Downloading);
-            return fetchWithProgress(fileName, onProgress, true, headers).then((fileData) => {
-                if (onProgress) onProgress(0, '0%', LoaderStatus.Processing);
-                return SpzLoader.loadFromFileData(fileData, minimumAlpha, compressionLevel, optimizeSplatData,
-                                                  outSphericalHarmonicsDegree, sectionSize, sceneCenter, blockSize, bucketSize);
+            return delayedExecute(() => {
+                return PlyParser.parseToUncompressedSplatArray(plyFileData, outSphericalHarmonicsDegree);
+            })
+            .then((splatArray) => {
+                const splatBufferGenerator = SplatBufferGenerator.getStandardGenerator(minimumAlpha, compressionLevel, sectionSize,
+                                                                                       sceneCenter, blockSize, bucketSize);
+                return splatBufferGenerator.generateFromUncompressedSplatArray(splatArray);
             });
         }
-
-        static async loadFromFileData(spzFileData, minimumAlpha, compressionLevel, optimizeSplatData,
-                                      outSphericalHarmonicsDegree = 0, sectionSize, sceneCenter, blockSize, bucketSize) {
-            await delayedExecute();
-            const packed = await loadSpzPacked(spzFileData);
-            outSphericalHarmonicsDegree = Math.min(packed.shDegree, outSphericalHarmonicsDegree);
-
-            const splatArray = new UncompressedSplatArray(outSphericalHarmonicsDegree);
-
-            if (optimizeSplatData) {
-                unpackGaussians(packed, outSphericalHarmonicsDegree, false, splatArray, 0);
-                const splatBufferGenerator = SplatBufferGenerator.getStandardGenerator(minimumAlpha, compressionLevel,
-                                                                                       sectionSize, sceneCenter,
-                                                                                       blockSize, bucketSize);
-                return splatBufferGenerator.generateFromUncompressedSplatArray(splatArray);
-            } else {
-                const {
-                    splatBuffer,
-                    splatBufferDataOffsetBytes
-                  } = SplatBuffer.preallocateUncompressed(packed.numPoints, outSphericalHarmonicsDegree);
-                unpackGaussians(packed, outSphericalHarmonicsDegree, true, splatBuffer.bufferData, splatBufferDataOffsetBytes);
-                return splatBuffer;
-            }
-        }
-
     }
 
     class SplatParser {
@@ -4273,25 +2742,6 @@
             }
         }
 
-        static parseToUncompressedSplatArraySection(fromSplat, toSplat, fromBuffer, fromOffset, splatArray) {
-
-            for (let i = fromSplat; i <= toSplat; i++) {
-                const inBase = i * SplatParser.RowSizeBytes + fromOffset;
-                const inCenter = new Float32Array(fromBuffer, inBase, 3);
-                const inScale = new Float32Array(fromBuffer, inBase + SplatParser.CenterSizeBytes, 3);
-                const inColor = new Uint8Array(fromBuffer, inBase + SplatParser.CenterSizeBytes + SplatParser.ScaleSizeBytes, 4);
-                const inRotation = new Uint8Array(fromBuffer, inBase + SplatParser.CenterSizeBytes + SplatParser.ScaleSizeBytes +
-                                                  SplatParser.RotationSizeBytes, 4);
-
-                const quat = new THREE__namespace.Quaternion((inRotation[1] - 128) / 128, (inRotation[2] - 128) / 128,
-                                                  (inRotation[3] - 128) / 128, (inRotation[0] - 128) / 128);
-                quat.normalize();
-
-                splatArray.addSplatFromComonents(inCenter[0], inCenter[1], inCenter[2], inScale[0], inScale[1], inScale[2],
-                                                 quat.w, quat.x, quat.y, quat.z, inColor[0], inColor[1], inColor[2], inColor[3]);
-            }
-        }
-
         static parseStandardSplatToUncompressedSplatArray(inBuffer) {
             // Standard .splat row layout:
             // XYZ - Position (Float32)
@@ -4324,40 +2774,25 @@
 
     }
 
-    function finalize(splatData, optimizeSplatData, minimumAlpha, compressionLevel, sectionSize, sceneCenter, blockSize, bucketSize) {
-        if (optimizeSplatData) {
-            const splatBufferGenerator = SplatBufferGenerator.getStandardGenerator(minimumAlpha, compressionLevel,
-                                                                                   sectionSize, sceneCenter,
-                                                                                   blockSize, bucketSize);
-            return splatBufferGenerator.generateFromUncompressedSplatArray(splatData);
-        } else {
-            // TODO: Implement direct-to-SplatBuffer when not optimizing splat data
-            return SplatBuffer.generateFromUncompressedSplatArrays([splatData], minimumAlpha, 0, new THREE__namespace.Vector3());
-        }
-    }
-
     class SplatLoader {
 
-        static loadFromURL(fileName, onProgress, progressiveLoadToSplatBuffer, onProgressiveLoadSectionProgress, minimumAlpha, compressionLevel,
-                           optimizeSplatData = true, headers, sectionSize, sceneCenter, blockSize, bucketSize) {
-
-            let internalLoadType = progressiveLoadToSplatBuffer ? InternalLoadType.ProgressiveToSplatBuffer :
-                                                              InternalLoadType.ProgressiveToSplatArray;
-            if (optimizeSplatData) internalLoadType = InternalLoadType.ProgressiveToSplatArray;
+        static loadFromURL(fileName, onProgress, streamLoadData, onStreamedSectionProgress, minimumAlpha, compressionLevel,
+                           optimizeSplatData, sectionSize, sceneCenter, blockSize, bucketSize) {
 
             const splatDataOffsetBytes = SplatBuffer.HeaderSizeBytes + SplatBuffer.SectionHeaderSizeBytes;
-            const directLoadSectionSizeBytes = Constants.ProgressiveLoadSectionSize;
+            const streamSectionSizeBytes = Constants.StreamingSectionSize;
             const sectionCount = 1;
 
-            let directLoadBufferIn;
-            let directLoadBufferOut;
-            let directLoadSplatBuffer;
+            let streamBufferIn;
+            let streamBufferOut;
+            let streamSplatBuffer;
             let maxSplatCount = 0;
             let splatCount = 0;
 
-            let standardLoadUncompressedSplatArray;
-
-            const loadPromise = nativePromiseWithExtractedComponents();
+            let streamLoadCompleteResolver;
+            let streamLoadPromise = new Promise((resolve) => {
+                streamLoadCompleteResolver = resolve;
+            });
 
             let numBytesStreamed = 0;
             let numBytesLoaded = 0;
@@ -4365,35 +2800,14 @@
 
             const localOnProgress = (percent, percentStr, chunk, fileSize) => {
                 const loadComplete = percent >= 100;
-
-                if (chunk) {
-                    chunks.push(chunk);
-                }
-
-                if (internalLoadType === InternalLoadType.DownloadBeforeProcessing) {
-                    if (loadComplete) {
-                        loadPromise.resolve(chunks);
-                    }
-                    return;
-                }
-
-                if (!fileSize) {
-                    if (progressiveLoadToSplatBuffer) {
-                        throw new DirectLoadError('Cannon directly load .splat because no file size info is available.');
-                    } else {
-                        internalLoadType = InternalLoadType.DownloadBeforeProcessing;
-                        return;
-                    }
-                }
-
-                if (!directLoadBufferIn) {
-                    maxSplatCount = fileSize / SplatParser.RowSizeBytes;
-                    directLoadBufferIn = new ArrayBuffer(fileSize);
-                    const bytesPerSplat = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[0].BytesPerSplat;
-                    const splatBufferSizeBytes = splatDataOffsetBytes + bytesPerSplat * maxSplatCount;
-
-                    if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                        directLoadBufferOut = new ArrayBuffer(splatBufferSizeBytes);
+                if (!fileSize) streamLoadData = false;
+                if (streamLoadData) {
+                    if (!streamBufferIn) {
+                        maxSplatCount = fileSize / SplatParser.RowSizeBytes;
+                        streamBufferIn = new ArrayBuffer(fileSize);
+                        const bytesPerSplat = SplatBuffer.CompressionLevels[0].SphericalHarmonicsDegrees[0].BytesPerSplat;
+                        const splatBufferSizeBytes = splatDataOffsetBytes + bytesPerSplat * maxSplatCount;
+                        streamBufferOut = new ArrayBuffer(splatBufferSizeBytes);
                         SplatBuffer.writeHeaderToBuffer({
                             versionMajor: SplatBuffer.CurrentMajorVersion,
                             versionMinor: SplatBuffer.CurrentMinorVersion,
@@ -4403,34 +2817,23 @@
                             splatCount: splatCount,
                             compressionLevel: 0,
                             sceneCenter: new THREE__namespace.Vector3()
-                        }, directLoadBufferOut);
-                    } else {
-                        standardLoadUncompressedSplatArray = new UncompressedSplatArray(0);
+                        }, streamBufferOut);
                     }
-                }
 
-                if (chunk) {
-                    new Uint8Array(directLoadBufferIn, numBytesLoaded, chunk.byteLength).set(new Uint8Array(chunk));
-                    numBytesLoaded += chunk.byteLength;
+                    if (chunk) {
+                        chunks.push(chunk);
+                        new Uint8Array(streamBufferIn, numBytesLoaded, chunk.byteLength).set(new Uint8Array(chunk));
+                        numBytesLoaded += chunk.byteLength;
 
-                    const bytesLoadedSinceLastSection = numBytesLoaded - numBytesStreamed;
-                    if (bytesLoadedSinceLastSection > directLoadSectionSizeBytes || loadComplete) {
-                        const bytesToUpdate = loadComplete ? bytesLoadedSinceLastSection : directLoadSectionSizeBytes;
-                        const addedSplatCount = bytesToUpdate / SplatParser.RowSizeBytes;
-                        const newSplatCount = splatCount + addedSplatCount;
-
-                        if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                            SplatParser.parseToUncompressedSplatBufferSection(splatCount, newSplatCount - 1, directLoadBufferIn, 0,
-                                                                                directLoadBufferOut, splatDataOffsetBytes);
-                        } else {
-                            SplatParser.parseToUncompressedSplatArraySection(splatCount, newSplatCount - 1, directLoadBufferIn, 0,
-                                                                                standardLoadUncompressedSplatArray);
-                        }
-
-                        splatCount = newSplatCount;
-
-                        if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                            if (!directLoadSplatBuffer) {
+                        const bytesLoadedSinceLastSection = numBytesLoaded - numBytesStreamed;
+                        if (bytesLoadedSinceLastSection > streamSectionSizeBytes || loadComplete) {
+                            const bytesToUpdate = loadComplete ? bytesLoadedSinceLastSection : streamSectionSizeBytes;
+                            const addedSplatCount = bytesToUpdate / SplatParser.RowSizeBytes;
+                            const newSplatCount = splatCount + addedSplatCount;
+                            SplatParser.parseToUncompressedSplatBufferSection(splatCount, newSplatCount - 1, streamBufferIn, 0,
+                                                                              streamBufferOut, splatDataOffsetBytes);
+                            splatCount = newSplatCount;
+                            if (!streamSplatBuffer) {
                                 SplatBuffer.writeSectionHeaderToBuffer({
                                     maxSplatCount: maxSplatCount,
                                     splatCount: splatCount,
@@ -4441,48 +2844,30 @@
                                     storageSizeBytes: 0,
                                     fullBucketCount: 0,
                                     partiallyFilledBucketCount: 0
-                                }, 0, directLoadBufferOut, SplatBuffer.HeaderSizeBytes);
-                                directLoadSplatBuffer = new SplatBuffer(directLoadBufferOut, false);
+                                }, 0, streamBufferOut, SplatBuffer.HeaderSizeBytes);
+                                streamSplatBuffer = new SplatBuffer(streamBufferOut, false);
                             }
-                            directLoadSplatBuffer.updateLoadedCounts(1, splatCount);
-                            if (onProgressiveLoadSectionProgress) {
-                                onProgressiveLoadSectionProgress(directLoadSplatBuffer, loadComplete);
-                            }
+                            streamSplatBuffer.updateLoadedCounts(1, splatCount);
+                            onStreamedSectionProgress(streamSplatBuffer, loadComplete);
+                            numBytesStreamed += streamSectionSizeBytes;
                         }
-
-                        numBytesStreamed += directLoadSectionSizeBytes;
+                    }
+                    if (loadComplete) {
+                        streamLoadCompleteResolver(streamSplatBuffer);
                     }
                 }
-
-                if (loadComplete) {
-                    if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                        loadPromise.resolve(directLoadSplatBuffer);
-                    } else {
-                        loadPromise.resolve(standardLoadUncompressedSplatArray);
-                    }
-                }
-
                 if (onProgress) onProgress(percent, percentStr, LoaderStatus.Downloading);
+                return streamLoadData;
             };
 
-            if (onProgress) onProgress(0, '0%', LoaderStatus.Downloading);
-            return fetchWithProgress(fileName, localOnProgress, false, headers).then(() => {
+            return fetchWithProgress(fileName, localOnProgress, true).then((fullBuffer) => {
                 if (onProgress) onProgress(0, '0%', LoaderStatus.Processing);
-                return loadPromise.promise.then((splatData) => {
+                const loadPromise = streamLoadData ? streamLoadPromise :
+                    SplatLoader.loadFromFileData(fullBuffer, minimumAlpha, compressionLevel, optimizeSplatData,
+                                                 sectionSize, sceneCenter, blockSize, bucketSize);
+                return loadPromise.then((splatBuffer) => {
                     if (onProgress) onProgress(100, '100%', LoaderStatus.Done);
-                    if (internalLoadType === InternalLoadType.DownloadBeforeProcessing) {
-                        return new Blob(chunks).arrayBuffer().then((splatData) => {
-                            return SplatLoader.loadFromFileData(splatData, minimumAlpha, compressionLevel, optimizeSplatData,
-                                                                sectionSize, sceneCenter, blockSize, bucketSize);
-                        });
-                    } else if (internalLoadType === InternalLoadType.ProgressiveToSplatBuffer) {
-                        return splatData;
-                    } else {
-                        return delayedExecute(() => {
-                            return finalize(splatData, optimizeSplatData, minimumAlpha, compressionLevel,
-                                            sectionSize, sceneCenter, blockSize, bucketSize);
-                        });
-                    }
+                    return splatBuffer;
                 });
             });
         }
@@ -4491,8 +2876,14 @@
                                 sectionSize, sceneCenter, blockSize, bucketSize) {
             return delayedExecute(() => {
                 const splatArray = SplatParser.parseStandardSplatToUncompressedSplatArray(splatFileData);
-                return finalize(splatArray, optimizeSplatData, minimumAlpha, compressionLevel,
-                                sectionSize, sceneCenter, blockSize, bucketSize);
+                if (optimizeSplatData) {
+                    const splatBufferGenerator = SplatBufferGenerator.getStandardGenerator(minimumAlpha, compressionLevel,
+                                                                                           sectionSize, sceneCenter, blockSize,
+                                                                                           bucketSize);
+                    return splatBufferGenerator.generateFromUncompressedSplatArray(splatArray);
+                } else {
+                    return SplatBuffer.generateFromUncompressedSplatArrays([splatArray], minimumAlpha, 0, new THREE__namespace.Vector3());
+                }
             });
         }
 
@@ -4514,9 +2905,9 @@
             }
         };
 
-        static loadFromURL(fileName, externalOnProgress, progressiveLoadToSplatBuffer, onSectionBuilt, headers) {
-            let directLoadBuffer;
-            let directLoadSplatBuffer;
+        static loadFromURL(fileName, onProgress, streamLoadData, onSectionBuilt) {
+            let streamBuffer;
+            let streamSplatBuffer;
 
             let headerBuffer;
             let header;
@@ -4529,16 +2920,18 @@
             let sectionHeadersLoading = false;
 
             let numBytesLoaded = 0;
-            let numBytesProgressivelyLoaded = 0;
+            let numBytesStreamed = 0;
+            let streamSectionSizeBytes = Constants.StreamingSectionSize;
             let totalBytesToDownload = 0;
 
-            let downloadComplete = false;
             let loadComplete = false;
-            let loadSectionQueued = false;
 
             let chunks = [];
 
-            const directLoadPromise = nativePromiseWithExtractedComponents();
+            let streamLoadCompleteResolver;
+            let streamLoadPromise = new Promise((resolve) => {
+                streamLoadCompleteResolver = resolve;
+            });
 
             const checkAndLoadHeader = () => {
                 if (!headerLoaded && !headerLoading && numBytesLoaded >= SplatBuffer.HeaderSizeBytes) {
@@ -4564,7 +2957,7 @@
                     queuedCheckAndLoadSectionsCount++;
                     window.setTimeout(() => {
                         queuedCheckAndLoadSectionsCount--;
-                        checkAndLoadSections();
+                        checkAndLoadSections(true);
                     }, 1);
                 }
             };
@@ -4586,12 +2979,12 @@
                         }
                         const totalStorageSizeBytes = SplatBuffer.HeaderSizeBytes + header.maxSectionCount *
                                                       SplatBuffer.SectionHeaderSizeBytes + totalSectionStorageStorageByes;
-                        if (!directLoadBuffer) {
-                            directLoadBuffer = new ArrayBuffer(totalStorageSizeBytes);
+                        if (!streamBuffer) {
+                            streamBuffer = new ArrayBuffer(totalStorageSizeBytes);
                             let offset = 0;
                             for (let i = 0; i < chunks.length; i++) {
                                 const chunk = chunks[i];
-                                new Uint8Array(directLoadBuffer, offset, chunk.byteLength).set(new Uint8Array(chunk));
+                                new Uint8Array(streamBuffer, offset, chunk.byteLength).set(new Uint8Array(chunk));
                                 offset += chunk.byteLength;
                             }
                         }
@@ -4612,90 +3005,75 @@
             };
 
             const checkAndLoadSections = () => {
-                if (loadSectionQueued) return;
-                loadSectionQueued = true;
-                const checkAndLoadFunc = () => {
-                    loadSectionQueued = false;
-                    if (sectionHeadersLoaded) {
+                if (sectionHeadersLoaded) {
 
-                        if (loadComplete) return;
+                    if (loadComplete) return;
 
-                        downloadComplete = numBytesLoaded >= totalBytesToDownload;
+                    loadComplete = numBytesLoaded >= totalBytesToDownload;
 
-                        let bytesLoadedSinceLastSection = numBytesLoaded - numBytesProgressivelyLoaded;
-                        if (bytesLoadedSinceLastSection > Constants.ProgressiveLoadSectionSize || downloadComplete) {
+                    const bytesLoadedSinceLastSection = numBytesLoaded - numBytesStreamed;
+                    if (bytesLoadedSinceLastSection > streamSectionSizeBytes || loadComplete) {
 
-                            numBytesProgressivelyLoaded += Constants.ProgressiveLoadSectionSize;
-                            loadComplete = numBytesProgressivelyLoaded >= totalBytesToDownload;
+                        numBytesStreamed = numBytesLoaded;
 
-                            if (!directLoadSplatBuffer) directLoadSplatBuffer = new SplatBuffer(directLoadBuffer, false);
+                        if (!streamSplatBuffer) streamSplatBuffer = new SplatBuffer(streamBuffer, false);
 
-                            const baseDataOffset = SplatBuffer.HeaderSizeBytes + SplatBuffer.SectionHeaderSizeBytes * header.maxSectionCount;
-                            let sectionBase = 0;
-                            let reachedSections = 0;
-                            let loadedSplatCount = 0;
-                            for (let i = 0; i < header.maxSectionCount; i++) {
-                                const sectionHeader = sectionHeaders[i];
-                                const bucketsDataOffset = sectionBase + sectionHeader.partiallyFilledBucketCount * 4 +
-                                                        sectionHeader.bucketStorageSizeBytes * sectionHeader.bucketCount;
-                                const bytesRequiredToReachSectionSplatData = baseDataOffset + bucketsDataOffset;
-                                if (numBytesProgressivelyLoaded >= bytesRequiredToReachSectionSplatData) {
-                                    reachedSections++;
-                                    const bytesPastSSectionSplatDataStart = numBytesProgressivelyLoaded - bytesRequiredToReachSectionSplatData;
-                                    const baseDescriptor = SplatBuffer.CompressionLevels[header.compressionLevel];
-                                    const shDesc = baseDescriptor.SphericalHarmonicsDegrees[sectionHeader.sphericalHarmonicsDegree];
-                                    const bytesPerSplat = shDesc.BytesPerSplat;
-                                    let loadedSplatsForSection = Math.floor(bytesPastSSectionSplatDataStart / bytesPerSplat);
-                                    loadedSplatsForSection = Math.min(loadedSplatsForSection, sectionHeader.maxSplatCount);
-                                    loadedSplatCount += loadedSplatsForSection;
-                                    directLoadSplatBuffer.updateLoadedCounts(reachedSections, loadedSplatCount);
-                                    directLoadSplatBuffer.updateSectionLoadedCounts(i, loadedSplatsForSection);
-                                } else {
-                                    break;
-                                }
-                                sectionBase += sectionHeader.storageSizeBytes;
-                            }
-
-                            onSectionBuilt(directLoadSplatBuffer, loadComplete);
-
-                            const percentComplete = numBytesProgressivelyLoaded / totalBytesToDownload * 100;
-                            const percentLabel = (percentComplete).toFixed(2) + '%';
-
-                            if (externalOnProgress) externalOnProgress(percentComplete, percentLabel, LoaderStatus.Downloading);
-
-                            if (loadComplete) {
-                                directLoadPromise.resolve(directLoadSplatBuffer);
+                        const baseDataOffset = SplatBuffer.HeaderSizeBytes + SplatBuffer.SectionHeaderSizeBytes * header.maxSectionCount;
+                        let sectionBase = 0;
+                        let reachedSections = 0;
+                        let loadedSplatCount = 0;
+                        for (let i = 0; i < header.maxSectionCount; i++) {
+                            const sectionHeader = sectionHeaders[i];
+                            const bucketsDataOffset = sectionBase + sectionHeader.partiallyFilledBucketCount * 4 +
+                                                      sectionHeader.bucketStorageSizeBytes * sectionHeader.bucketCount;
+                            const bytesRequiredToReachSectionSplatData = baseDataOffset + bucketsDataOffset;
+                            if (numBytesLoaded >= bytesRequiredToReachSectionSplatData) {
+                                reachedSections++;
+                                const bytesPastSSectionSplatDataStart = numBytesLoaded - bytesRequiredToReachSectionSplatData;
+                                const baseDescriptor = SplatBuffer.CompressionLevels[header.compressionLevel];
+                                const shDesc = baseDescriptor.SphericalHarmonicsDegrees[sectionHeader.sphericalHarmonicsDegree];
+                                const bytesPerSplat = shDesc.BytesPerSplat;
+                                let loadedSplatsForSection = Math.floor(bytesPastSSectionSplatDataStart / bytesPerSplat);
+                                loadedSplatsForSection = Math.min(loadedSplatsForSection, sectionHeader.maxSplatCount);
+                                loadedSplatCount += loadedSplatsForSection;
+                                streamSplatBuffer.updateLoadedCounts(reachedSections, loadedSplatCount);
+                                streamSplatBuffer.updateSectionLoadedCounts(i, loadedSplatsForSection);
                             } else {
-                                checkAndLoadSections();
+                                break;
                             }
+                            sectionBase += sectionHeader.storageSizeBytes;
+                        }
+
+                        onSectionBuilt(streamSplatBuffer, loadComplete);
+
+                        if (loadComplete) {
+                            streamLoadCompleteResolver(streamSplatBuffer);
                         }
                     }
-                };
-                window.setTimeout(checkAndLoadFunc, Constants.ProgressiveLoadSectionDelayDuration);
+                }
             };
 
             const localOnProgress = (percent, percentStr, chunk) => {
                 if (chunk) {
                     chunks.push(chunk);
-                    if (directLoadBuffer) {
-                        new Uint8Array(directLoadBuffer, numBytesLoaded, chunk.byteLength).set(new Uint8Array(chunk));
+                    if (streamBuffer) {
+                        new Uint8Array(streamBuffer, numBytesLoaded, chunk.byteLength).set(new Uint8Array(chunk));
                     }
                     numBytesLoaded += chunk.byteLength;
                 }
-                if (progressiveLoadToSplatBuffer) {
+                if (streamLoadData) {
                     checkAndLoadHeader();
                     checkAndLoadSectionHeaders();
                     checkAndLoadSections();
-                } else {
-                    if (externalOnProgress) externalOnProgress(percent, percentStr, LoaderStatus.Downloading);
                 }
+                if (onProgress) onProgress(percent, percentStr, LoaderStatus.Downloading);
             };
 
-            return fetchWithProgress(fileName, localOnProgress, !progressiveLoadToSplatBuffer, headers).then((fullBuffer) => {
-                if (externalOnProgress) externalOnProgress(0, '0%', LoaderStatus.Processing);
-                const loadPromise = progressiveLoadToSplatBuffer ? directLoadPromise.promise : KSplatLoader.loadFromFileData(fullBuffer);
+            return fetchWithProgress(fileName, localOnProgress, !streamLoadData).then((fullBuffer) => {
+                if (onProgress) onProgress(0, '0%', LoaderStatus.Processing);
+                const loadPromise = streamLoadData ? streamLoadPromise : KSplatLoader.loadFromFileData(fullBuffer);
                 return loadPromise.then((splatBuffer) => {
-                    if (externalOnProgress) externalOnProgress(100, '100%', LoaderStatus.Done);
+                    if (onProgress) onProgress(100, '100%', LoaderStatus.Done);
                     return splatBuffer;
                 });
             });
@@ -4733,15 +3111,13 @@
     const SceneFormat = {
         'Splat': 0,
         'KSplat': 1,
-        'Ply': 2,
-        'Spz': 3
+        'Ply': 2
     };
 
     const sceneFormatFromPath = (path) => {
         if (path.endsWith('.ply')) return SceneFormat.Ply;
         else if (path.endsWith('.splat')) return SceneFormat.Splat;
         else if (path.endsWith('.ksplat')) return SceneFormat.KSplat;
-        else if (path.endsWith('.spz')) return SceneFormat.Spz;
         return null;
     };
 
@@ -6409,7 +4785,7 @@
         }
 
         setContainer(container) {
-            if (this.container && this.spinnerContainerOuter.parentElement === this.container) {
+            if (this.container) {
                 this.container.removeChild(this.spinnerContainerOuter);
             }
             if (container) {
@@ -6531,7 +4907,7 @@
         }
 
         setContainer(container) {
-            if (this.container && this.progressBarContainerOuter.parentElement === this.container) {
+            if (this.container) {
                 this.container.removeChild(this.progressBarContainerOuter);
             }
             if (container) {
@@ -6691,7 +5067,7 @@
         };
 
         setContainer(container) {
-            if (this.container && this.infoPanelContainer.parentElement === this.container) {
+            if (this.container) {
                 this.container.removeChild(this.infoPanelContainer);
             }
             if (container) {
@@ -6712,8 +5088,6 @@
         }
 
     }
-
-    const _axis = new THREE__namespace.Vector3();
 
     class ArrowHelper extends THREE__namespace.Object3D {
 
@@ -7365,11 +5739,6 @@
 
     }
 
-    const SplatRenderMode = {
-        ThreeD: 0,
-        TwoD: 1
-    };
-
     class Raycaster {
 
         constructor(origin, direction, raycastAgainstTrueSplatEllipsoid = false) {
@@ -7474,29 +5843,17 @@
                 }
                 if (node.data && node.data.indexes && node.data.indexes.length > 0) {
                     for (let i = 0; i < node.data.indexes.length; i++) {
-
                         const splatGlobalIndex = node.data.indexes[i];
-                        const splatSceneIndex = splatTree.splatMesh.getSceneIndexForSplat(splatGlobalIndex);
-                        const splatScene = splatTree.splatMesh.getScene(splatSceneIndex);
-                        if (!splatScene.visible) continue;
-
                         splatTree.splatMesh.getSplatColor(splatGlobalIndex, tempColor);
                         splatTree.splatMesh.getSplatCenter(splatGlobalIndex, tempCenter);
                         splatTree.splatMesh.getSplatScaleAndRotation(splatGlobalIndex, tempScale, tempRotation);
 
-                        if (tempScale.x <= scaleEpsilon || tempScale.y <= scaleEpsilon ||
-                            splatTree.splatMesh.splatRenderMode === SplatRenderMode.ThreeD && tempScale.z <= scaleEpsilon) {
+                        if (tempScale.x <= scaleEpsilon || tempScale.y <= scaleEpsilon || tempScale.z <= scaleEpsilon) {
                             continue;
                         }
 
                         if (!this.raycastAgainstTrueSplatEllipsoid) {
-                            let radius = (tempScale.x + tempScale.y);
-                            let componentCount = 2;
-                            if (splatTree.splatMesh.splatRenderMode === SplatRenderMode.ThreeD) {
-                                radius += tempScale.z;
-                                componentCount = 3;
-                            }
-                            radius = radius / componentCount;
+                            const radius = (tempScale.x + tempScale.y + tempScale.z) / 3;
                             if (ray.intersectSphere(tempCenter, radius, tempHit)) {
                                 const hitClone = tempHit.clone();
                                 hitClone.splatIndex = splatGlobalIndex;
@@ -7532,1187 +5889,20 @@
         }();
     }
 
-    class SplatMaterial {
-
-        static buildVertexShaderBase(dynamicMode = false, enableOptionalEffects = false, maxSphericalHarmonicsDegree = 0, customVars = '') {
-            let vertexShaderSource = `
-        precision highp float;
-        #include <common>
-
-        attribute uint splatIndex;
-        uniform highp usampler2D centersColorsTexture;
-        uniform highp sampler2D sphericalHarmonicsTexture;
-        uniform highp sampler2D sphericalHarmonicsTextureR;
-        uniform highp sampler2D sphericalHarmonicsTextureG;
-        uniform highp sampler2D sphericalHarmonicsTextureB;
-
-        uniform highp usampler2D sceneIndexesTexture;
-        uniform vec2 sceneIndexesTextureSize;
-        uniform int sceneCount;
-    `;
-
-        if (enableOptionalEffects) {
-            vertexShaderSource += `
-            uniform float sceneOpacity[${Constants.MaxScenes}];
-            uniform int sceneVisibility[${Constants.MaxScenes}];
-        `;
-        }
-
-        if (dynamicMode) {
-            vertexShaderSource += `
-            uniform highp mat4 transforms[${Constants.MaxScenes}];
-        `;
-        }
-
-        vertexShaderSource += `
-        ${customVars}
-        uniform vec2 focal;
-        uniform float orthoZoom;
-        uniform int orthographicMode;
-        uniform int pointCloudModeEnabled;
-        uniform float inverseFocalAdjustment;
-        uniform vec2 viewport;
-        uniform vec2 basisViewport;
-        uniform vec2 centersColorsTextureSize;
-        uniform int sphericalHarmonicsDegree;
-        uniform vec2 sphericalHarmonicsTextureSize;
-        uniform int sphericalHarmonics8BitMode;
-        uniform int sphericalHarmonicsMultiTextureMode;
-        uniform float visibleRegionRadius;
-        uniform float visibleRegionFadeStartRadius;
-        uniform float firstRenderTime;
-        uniform float currentTime;
-        uniform int fadeInComplete;
-        uniform vec3 sceneCenter;
-        uniform float splatScale;
-        uniform float sphericalHarmonics8BitCompressionRangeMin[${Constants.MaxScenes}];
-        uniform float sphericalHarmonics8BitCompressionRangeMax[${Constants.MaxScenes}];
-
-        varying vec4 vColor;
-        varying vec2 vUv;
-        varying vec2 vPosition;
-
-        mat3 quaternionToRotationMatrix(float x, float y, float z, float w) {
-            float s = 1.0 / sqrt(w * w + x * x + y * y + z * z);
-        
-            return mat3(
-                1. - 2. * (y * y + z * z),
-                2. * (x * y + w * z),
-                2. * (x * z - w * y),
-                2. * (x * y - w * z),
-                1. - 2. * (x * x + z * z),
-                2. * (y * z + w * x),
-                2. * (x * z + w * y),
-                2. * (y * z - w * x),
-                1. - 2. * (x * x + y * y)
-            );
-        }
-
-        const float sqrt8 = sqrt(8.0);
-        const float minAlpha = 1.0 / 255.0;
-
-        const vec4 encodeNorm4 = vec4(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0);
-        const uvec4 mask4 = uvec4(uint(0x000000FF), uint(0x0000FF00), uint(0x00FF0000), uint(0xFF000000));
-        const uvec4 shift4 = uvec4(0, 8, 16, 24);
-        vec4 uintToRGBAVec (uint u) {
-           uvec4 urgba = mask4 & u;
-           urgba = urgba >> shift4;
-           vec4 rgba = vec4(urgba) * encodeNorm4;
-           return rgba;
-        }
-
-        vec2 getDataUV(in int stride, in int offset, in vec2 dimensions) {
-            vec2 samplerUV = vec2(0.0, 0.0);
-            float d = float(splatIndex * uint(stride) + uint(offset)) / dimensions.x;
-            samplerUV.y = float(floor(d)) / dimensions.y;
-            samplerUV.x = fract(d);
-            return samplerUV;
-        }
-
-        vec2 getDataUVF(in uint sIndex, in float stride, in uint offset, in vec2 dimensions) {
-            vec2 samplerUV = vec2(0.0, 0.0);
-            float d = float(uint(float(sIndex) * stride) + offset) / dimensions.x;
-            samplerUV.y = float(floor(d)) / dimensions.y;
-            samplerUV.x = fract(d);
-            return samplerUV;
-        }
-
-        const float SH_C1 = 0.4886025119029199f;
-        const float[5] SH_C2 = float[](1.0925484, -1.0925484, 0.3153916, -1.0925484, 0.5462742);
-
-        void main () {
-
-            uint oddOffset = splatIndex & uint(0x00000001);
-            uint doubleOddOffset = oddOffset * uint(2);
-            bool isEven = oddOffset == uint(0);
-            uint nearestEvenIndex = splatIndex - oddOffset;
-            float fOddOffset = float(oddOffset);
-
-            uvec4 sampledCenterColor = texture(centersColorsTexture, getDataUV(1, 0, centersColorsTextureSize));
-            vec3 splatCenter = uintBitsToFloat(uvec3(sampledCenterColor.gba));
-
-            uint sceneIndex = uint(0);
-            if (sceneCount > 1) {
-                sceneIndex = texture(sceneIndexesTexture, getDataUV(1, 0, sceneIndexesTextureSize)).r;
-            }
-            `;
-
-            if (enableOptionalEffects) {
-                vertexShaderSource += `
-                float splatOpacityFromScene = sceneOpacity[sceneIndex];
-                int sceneVisible = sceneVisibility[sceneIndex];
-                if (splatOpacityFromScene <= 0.01 || sceneVisible == 0) {
-                    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-                    return;
-                }
-            `;
-            }
-
-            if (dynamicMode) {
-                vertexShaderSource += `
-                mat4 transform = transforms[sceneIndex];
-                mat4 transformModelViewMatrix = viewMatrix * transform;
-            `;
-            } else {
-                vertexShaderSource += `mat4 transformModelViewMatrix = modelViewMatrix;`;
-            }
-
-            vertexShaderSource += `
-            float sh8BitCompressionRangeMinForScene = sphericalHarmonics8BitCompressionRangeMin[sceneIndex];
-            float sh8BitCompressionRangeMaxForScene = sphericalHarmonics8BitCompressionRangeMax[sceneIndex];
-            float sh8BitCompressionRangeForScene = sh8BitCompressionRangeMaxForScene - sh8BitCompressionRangeMinForScene;
-            float sh8BitCompressionHalfRangeForScene = sh8BitCompressionRangeForScene / 2.0;
-            vec3 vec8BitSHShift = vec3(sh8BitCompressionRangeMinForScene);
-
-            vec4 viewCenter = transformModelViewMatrix * vec4(splatCenter, 1.0);
-
-            vec4 clipCenter = projectionMatrix * viewCenter;
-
-            float clip = 1.2 * clipCenter.w;
-            if (clipCenter.z < -clip || clipCenter.x < -clip || clipCenter.x > clip || clipCenter.y < -clip || clipCenter.y > clip) {
-                gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
-                return;
-            }
-
-            vec3 ndcCenter = clipCenter.xyz / clipCenter.w;
-
-            vPosition = position.xy;
-            vColor = uintToRGBAVec(sampledCenterColor.r);
-        `;
-
-            // Proceed to sampling and rendering 1st degree spherical harmonics
-            if (maxSphericalHarmonicsDegree >= 1) {
-
-                vertexShaderSource += `   
-            if (sphericalHarmonicsDegree >= 1) {
-            `;
-
-                if (dynamicMode) {
-                    vertexShaderSource += `
-                    vec3 worldViewDir = normalize(splatCenter - vec3(inverse(transform) * vec4(cameraPosition, 1.0)));
-                `;
-                } else {
-                    vertexShaderSource += `
-                    vec3 worldViewDir = normalize(splatCenter - cameraPosition);
-                `;
-                }
-
-                vertexShaderSource += `
-                vec3 sh1;
-                vec3 sh2;
-                vec3 sh3;
-            `;
-
-                if (maxSphericalHarmonicsDegree >= 2) {
-                    vertexShaderSource += `
-                    vec3 sh4;
-                    vec3 sh5;
-                    vec3 sh6;
-                    vec3 sh7;
-                    vec3 sh8;
-                `;
-                }
-
-                // Determining how to sample spherical harmonics textures to get the coefficients for calculations for a given degree
-                // depends on how many total degrees (maxSphericalHarmonicsDegree) are present in the textures. This is because that
-                // number affects how they are packed in the textures, and therefore the offset & stride required to access them.
-
-                // Sample spherical harmonics textures with 1 degree worth of data for 1st degree calculations, and store in sh1, sh2, and sh3
-                if (maxSphericalHarmonicsDegree === 1) {
-                    vertexShaderSource += `
-                    if (sphericalHarmonicsMultiTextureMode == 0) {
-                        vec2 shUV = getDataUVF(nearestEvenIndex, 2.5, doubleOddOffset, sphericalHarmonicsTextureSize);
-                        vec4 sampledSH0123 = texture(sphericalHarmonicsTexture, shUV);
-                        shUV = getDataUVF(nearestEvenIndex, 2.5, doubleOddOffset + uint(1), sphericalHarmonicsTextureSize);
-                        vec4 sampledSH4567 = texture(sphericalHarmonicsTexture, shUV);
-                        shUV = getDataUVF(nearestEvenIndex, 2.5, doubleOddOffset + uint(2), sphericalHarmonicsTextureSize);
-                        vec4 sampledSH891011 = texture(sphericalHarmonicsTexture, shUV);
-                        sh1 = vec3(sampledSH0123.rgb) * (1.0 - fOddOffset) + vec3(sampledSH0123.ba, sampledSH4567.r) * fOddOffset;
-                        sh2 = vec3(sampledSH0123.a, sampledSH4567.rg) * (1.0 - fOddOffset) + vec3(sampledSH4567.gba) * fOddOffset;
-                        sh3 = vec3(sampledSH4567.ba, sampledSH891011.r) * (1.0 - fOddOffset) + vec3(sampledSH891011.rgb) * fOddOffset;
-                    } else {
-                        vec2 sampledSH01R = texture(sphericalHarmonicsTextureR, getDataUV(2, 0, sphericalHarmonicsTextureSize)).rg;
-                        vec2 sampledSH23R = texture(sphericalHarmonicsTextureR, getDataUV(2, 1, sphericalHarmonicsTextureSize)).rg;
-                        vec2 sampledSH01G = texture(sphericalHarmonicsTextureG, getDataUV(2, 0, sphericalHarmonicsTextureSize)).rg;
-                        vec2 sampledSH23G = texture(sphericalHarmonicsTextureG, getDataUV(2, 1, sphericalHarmonicsTextureSize)).rg;
-                        vec2 sampledSH01B = texture(sphericalHarmonicsTextureB, getDataUV(2, 0, sphericalHarmonicsTextureSize)).rg;
-                        vec2 sampledSH23B = texture(sphericalHarmonicsTextureB, getDataUV(2, 1, sphericalHarmonicsTextureSize)).rg;
-                        sh1 = vec3(sampledSH01R.rg, sampledSH23R.r);
-                        sh2 = vec3(sampledSH01G.rg, sampledSH23G.r);
-                        sh3 = vec3(sampledSH01B.rg, sampledSH23B.r);
-                    }
-                `;
-                // Sample spherical harmonics textures with 2 degrees worth of data for 1st degree calculations, and store in sh1, sh2, and sh3
-                } else if (maxSphericalHarmonicsDegree === 2) {
-                    vertexShaderSource += `
-                    vec4 sampledSH0123;
-                    vec4 sampledSH4567;
-                    vec4 sampledSH891011;
-
-                    vec4 sampledSH0123R;
-                    vec4 sampledSH0123G;
-                    vec4 sampledSH0123B;
-
-                    if (sphericalHarmonicsMultiTextureMode == 0) {
-                        sampledSH0123 = texture(sphericalHarmonicsTexture, getDataUV(6, 0, sphericalHarmonicsTextureSize));
-                        sampledSH4567 = texture(sphericalHarmonicsTexture, getDataUV(6, 1, sphericalHarmonicsTextureSize));
-                        sampledSH891011 = texture(sphericalHarmonicsTexture, getDataUV(6, 2, sphericalHarmonicsTextureSize));
-                        sh1 = sampledSH0123.rgb;
-                        sh2 = vec3(sampledSH0123.a, sampledSH4567.rg);
-                        sh3 = vec3(sampledSH4567.ba, sampledSH891011.r);
-                    } else {
-                        sampledSH0123R = texture(sphericalHarmonicsTextureR, getDataUV(2, 0, sphericalHarmonicsTextureSize));
-                        sampledSH0123G = texture(sphericalHarmonicsTextureG, getDataUV(2, 0, sphericalHarmonicsTextureSize));
-                        sampledSH0123B = texture(sphericalHarmonicsTextureB, getDataUV(2, 0, sphericalHarmonicsTextureSize));
-                        sh1 = vec3(sampledSH0123R.rgb);
-                        sh2 = vec3(sampledSH0123G.rgb);
-                        sh3 = vec3(sampledSH0123B.rgb);
-                    }
-                `;
-                }
-
-                // Perform 1st degree spherical harmonics calculations
-                vertexShaderSource += `
-                    if (sphericalHarmonics8BitMode == 1) {
-                        sh1 = sh1 * sh8BitCompressionRangeForScene + vec8BitSHShift;
-                        sh2 = sh2 * sh8BitCompressionRangeForScene + vec8BitSHShift;
-                        sh3 = sh3 * sh8BitCompressionRangeForScene + vec8BitSHShift;
-                    }
-                    float x = worldViewDir.x;
-                    float y = worldViewDir.y;
-                    float z = worldViewDir.z;
-                    vColor.rgb += SH_C1 * (-sh1 * y + sh2 * z - sh3 * x);
-            `;
-
-                // Proceed to sampling and rendering 2nd degree spherical harmonics
-                if (maxSphericalHarmonicsDegree >= 2) {
-
-                    vertexShaderSource += `
-                    if (sphericalHarmonicsDegree >= 2) {
-                        float xx = x * x;
-                        float yy = y * y;
-                        float zz = z * z;
-                        float xy = x * y;
-                        float yz = y * z;
-                        float xz = x * z;
-                `;
-
-                    // Sample spherical harmonics textures with 2 degrees worth of data for 2nd degree calculations,
-                    // and store in sh4, sh5, sh6, sh7, and sh8
-                    if (maxSphericalHarmonicsDegree === 2) {
-                        vertexShaderSource += `
-                        if (sphericalHarmonicsMultiTextureMode == 0) {
-                            vec4 sampledSH12131415 = texture(sphericalHarmonicsTexture, getDataUV(6, 3, sphericalHarmonicsTextureSize));
-                            vec4 sampledSH16171819 = texture(sphericalHarmonicsTexture, getDataUV(6, 4, sphericalHarmonicsTextureSize));
-                            vec4 sampledSH20212223 = texture(sphericalHarmonicsTexture, getDataUV(6, 5, sphericalHarmonicsTextureSize));
-                            sh4 = sampledSH891011.gba;
-                            sh5 = sampledSH12131415.rgb;
-                            sh6 = vec3(sampledSH12131415.a, sampledSH16171819.rg);
-                            sh7 = vec3(sampledSH16171819.ba, sampledSH20212223.r);
-                            sh8 = sampledSH20212223.gba;
-                        } else {
-                            vec4 sampledSH4567R = texture(sphericalHarmonicsTextureR, getDataUV(2, 1, sphericalHarmonicsTextureSize));
-                            vec4 sampledSH4567G = texture(sphericalHarmonicsTextureG, getDataUV(2, 1, sphericalHarmonicsTextureSize));
-                            vec4 sampledSH4567B = texture(sphericalHarmonicsTextureB, getDataUV(2, 1, sphericalHarmonicsTextureSize));
-                            sh4 = vec3(sampledSH0123R.a, sampledSH4567R.rg);
-                            sh5 = vec3(sampledSH4567R.ba, sampledSH0123G.a);
-                            sh6 = vec3(sampledSH4567G.rgb);
-                            sh7 = vec3(sampledSH4567G.a, sampledSH0123B.a, sampledSH4567B.r);
-                            sh8 = vec3(sampledSH4567B.gba);
-                        }
-                    `;
-                    }
-
-                    // Perform 2nd degree spherical harmonics calculations
-                    vertexShaderSource += `
-                        if (sphericalHarmonics8BitMode == 1) {
-                            sh4 = sh4 * sh8BitCompressionRangeForScene + vec8BitSHShift;
-                            sh5 = sh5 * sh8BitCompressionRangeForScene + vec8BitSHShift;
-                            sh6 = sh6 * sh8BitCompressionRangeForScene + vec8BitSHShift;
-                            sh7 = sh7 * sh8BitCompressionRangeForScene + vec8BitSHShift;
-                            sh8 = sh8 * sh8BitCompressionRangeForScene + vec8BitSHShift;
-                        }
-
-                        vColor.rgb +=
-                            (SH_C2[0] * xy) * sh4 +
-                            (SH_C2[1] * yz) * sh5 +
-                            (SH_C2[2] * (2.0 * zz - xx - yy)) * sh6 +
-                            (SH_C2[3] * xz) * sh7 +
-                            (SH_C2[4] * (xx - yy)) * sh8;
-                    }
-                `;
-                }
-
-                vertexShaderSource += `
-
-                vColor.rgb = clamp(vColor.rgb, vec3(0.), vec3(1.));
-
-            }
-
-            `;
-            }
-
-            return vertexShaderSource;
-        }
-
-        static getVertexShaderFadeIn() {
-            return `
-            if (fadeInComplete == 0) {
-                float opacityAdjust = 1.0;
-                float centerDist = length(splatCenter - sceneCenter);
-                float renderTime = max(currentTime - firstRenderTime, 0.0);
-
-                float fadeDistance = 0.75;
-                float distanceLoadFadeInFactor = step(visibleRegionFadeStartRadius, centerDist);
-                distanceLoadFadeInFactor = (1.0 - distanceLoadFadeInFactor) +
-                                        (1.0 - clamp((centerDist - visibleRegionFadeStartRadius) / fadeDistance, 0.0, 1.0)) *
-                                        distanceLoadFadeInFactor;
-                opacityAdjust *= distanceLoadFadeInFactor;
-                vColor.a *= opacityAdjust;
-            }
-        `;
-        }
-
-        static getUniforms(dynamicMode = false, enableOptionalEffects = false, maxSphericalHarmonicsDegree = 0,
-                           splatScale = 1.0, pointCloudModeEnabled = false) {
-
-            const uniforms = {
-                'sceneCenter': {
-                    'type': 'v3',
-                    'value': new THREE__namespace.Vector3()
-                },
-                'fadeInComplete': {
-                    'type': 'i',
-                    'value': 0
-                },
-                'orthographicMode': {
-                    'type': 'i',
-                    'value': 0
-                },
-                'visibleRegionFadeStartRadius': {
-                    'type': 'f',
-                    'value': 0.0
-                },
-                'visibleRegionRadius': {
-                    'type': 'f',
-                    'value': 0.0
-                },
-                'currentTime': {
-                    'type': 'f',
-                    'value': 0.0
-                },
-                'firstRenderTime': {
-                    'type': 'f',
-                    'value': 0.0
-                },
-                'centersColorsTexture': {
-                    'type': 't',
-                    'value': null
-                },
-                'sphericalHarmonicsTexture': {
-                    'type': 't',
-                    'value': null
-                },
-                'sphericalHarmonicsTextureR': {
-                    'type': 't',
-                    'value': null
-                },
-                'sphericalHarmonicsTextureG': {
-                    'type': 't',
-                    'value': null
-                },
-                'sphericalHarmonicsTextureB': {
-                    'type': 't',
-                    'value': null
-                },
-                'sphericalHarmonics8BitCompressionRangeMin': {
-                    'type': 'f',
-                    'value': []
-                },
-                'sphericalHarmonics8BitCompressionRangeMax': {
-                    'type': 'f',
-                    'value': []
-                },
-                'focal': {
-                    'type': 'v2',
-                    'value': new THREE__namespace.Vector2()
-                },
-                'orthoZoom': {
-                    'type': 'f',
-                    'value': 1.0
-                },
-                'inverseFocalAdjustment': {
-                    'type': 'f',
-                    'value': 1.0
-                },
-                'viewport': {
-                    'type': 'v2',
-                    'value': new THREE__namespace.Vector2()
-                },
-                'basisViewport': {
-                    'type': 'v2',
-                    'value': new THREE__namespace.Vector2()
-                },
-                'debugColor': {
-                    'type': 'v3',
-                    'value': new THREE__namespace.Color()
-                },
-                'centersColorsTextureSize': {
-                    'type': 'v2',
-                    'value': new THREE__namespace.Vector2(1024, 1024)
-                },
-                'sphericalHarmonicsDegree': {
-                    'type': 'i',
-                    'value': maxSphericalHarmonicsDegree
-                },
-                'sphericalHarmonicsTextureSize': {
-                    'type': 'v2',
-                    'value': new THREE__namespace.Vector2(1024, 1024)
-                },
-                'sphericalHarmonics8BitMode': {
-                    'type': 'i',
-                    'value': 0
-                },
-                'sphericalHarmonicsMultiTextureMode': {
-                    'type': 'i',
-                    'value': 0
-                },
-                'splatScale': {
-                    'type': 'f',
-                    'value': splatScale
-                },
-                'pointCloudModeEnabled': {
-                    'type': 'i',
-                    'value': pointCloudModeEnabled ? 1 : 0
-                },
-                'sceneIndexesTexture': {
-                    'type': 't',
-                    'value': null
-                },
-                'sceneIndexesTextureSize': {
-                    'type': 'v2',
-                    'value': new THREE__namespace.Vector2(1024, 1024)
-                },
-                'sceneCount': {
-                    'type': 'i',
-                    'value': 1
-                }
-            };
-            for (let i = 0; i < Constants.MaxScenes; i++) {
-                uniforms.sphericalHarmonics8BitCompressionRangeMin.value.push(-Constants.SphericalHarmonics8BitCompressionRange / 2.0);
-                uniforms.sphericalHarmonics8BitCompressionRangeMax.value.push(Constants.SphericalHarmonics8BitCompressionRange / 2.0);
-            }
-
-            if (enableOptionalEffects) {
-                const sceneOpacity = [];
-                for (let i = 0; i < Constants.MaxScenes; i++) {
-                    sceneOpacity.push(1.0);
-                }
-                uniforms['sceneOpacity'] ={
-                    'type': 'f',
-                    'value': sceneOpacity
-                };
-
-                const sceneVisibility = [];
-                for (let i = 0; i < Constants.MaxScenes; i++) {
-                    sceneVisibility.push(1);
-                }
-                uniforms['sceneVisibility'] ={
-                    'type': 'i',
-                    'value': sceneVisibility
-                };
-            }
-
-            if (dynamicMode) {
-                const transformMatrices = [];
-                for (let i = 0; i < Constants.MaxScenes; i++) {
-                    transformMatrices.push(new THREE__namespace.Matrix4());
-                }
-                uniforms['transforms'] = {
-                    'type': 'mat4',
-                    'value': transformMatrices
-                };
-            }
-
-            return uniforms;
-        }
-
-    }
-
-    class SplatMaterial3D {
-
-        /**
-         * Build the Three.js material that is used to render the splats.
-         * @param {number} dynamicMode If true, it means the scene geometry represented by this splat mesh is not stationary or
-         *                             that the splat count might change
-         * @param {boolean} enableOptionalEffects When true, allows for usage of extra properties and attributes in the shader for effects
-         *                                        such as opacity adjustment. Default is false for performance reasons.
-         * @param {boolean} antialiased If true, calculate compensation factor to deal with gaussians being rendered at a significantly
-         *                              different resolution than that of their training
-         * @param {number} maxScreenSpaceSplatSize The maximum clip space splat size
-         * @param {number} splatScale Value by which all splats are scaled in screen-space (default is 1.0)
-         * @param {number} pointCloudModeEnabled Render all splats as screen-space circles
-         * @param {number} maxSphericalHarmonicsDegree Degree of spherical harmonics to utilize in rendering splats
-         * @return {THREE.ShaderMaterial}
-         */
-        static build(dynamicMode = false, enableOptionalEffects = false, antialiased = false, maxScreenSpaceSplatSize = 2048,
-                     splatScale = 1.0, pointCloudModeEnabled = false, maxSphericalHarmonicsDegree = 0, kernel2DSize = 0.3) {
-
-            const customVertexVars = `
-            uniform vec2 covariancesTextureSize;
-            uniform highp sampler2D covariancesTexture;
-            uniform highp usampler2D covariancesTextureHalfFloat;
-            uniform int covariancesAreHalfFloat;
-
-            void fromCovarianceHalfFloatV4(uvec4 val, out vec4 first, out vec4 second) {
-                vec2 r = unpackHalf2x16(val.r);
-                vec2 g = unpackHalf2x16(val.g);
-                vec2 b = unpackHalf2x16(val.b);
-
-                first = vec4(r.x, r.y, g.x, g.y);
-                second = vec4(b.x, b.y, 0.0, 0.0);
-            }
-        `;
-
-            let vertexShaderSource = SplatMaterial.buildVertexShaderBase(dynamicMode, enableOptionalEffects,
-                                                                         maxSphericalHarmonicsDegree, customVertexVars);
-            vertexShaderSource += SplatMaterial3D.buildVertexShaderProjection(antialiased, enableOptionalEffects,
-                                                                              maxScreenSpaceSplatSize, kernel2DSize);
-            const fragmentShaderSource = SplatMaterial3D.buildFragmentShader();
-
-            const uniforms = SplatMaterial.getUniforms(dynamicMode, enableOptionalEffects,
-                                                       maxSphericalHarmonicsDegree, splatScale, pointCloudModeEnabled);
-
-            uniforms['covariancesTextureSize'] = {
-                'type': 'v2',
-                'value': new THREE__namespace.Vector2(1024, 1024)
-            };
-            uniforms['covariancesTexture'] = {
-                'type': 't',
-                'value': null
-            };
-            uniforms['covariancesTextureHalfFloat'] = {
-                'type': 't',
-                'value': null
-            };
-            uniforms['covariancesAreHalfFloat'] = {
-                'type': 'i',
-                'value': 0
-            };
-
-            const material = new THREE__namespace.ShaderMaterial({
-                uniforms: uniforms,
-                vertexShader: vertexShaderSource,
-                fragmentShader: fragmentShaderSource,
-                transparent: true,
-                alphaTest: 1.0,
-                blending: THREE__namespace.NormalBlending,
-                depthTest: true,
-                depthWrite: false,
-                side: THREE__namespace.DoubleSide
-            });
-
-            return material;
-        }
-
-        static buildVertexShaderProjection(antialiased, enableOptionalEffects, maxScreenSpaceSplatSize, kernel2DSize) {
-            let vertexShaderSource = `
-
-            vec4 sampledCovarianceA;
-            vec4 sampledCovarianceB;
-            vec3 cov3D_M11_M12_M13;
-            vec3 cov3D_M22_M23_M33;
-            if (covariancesAreHalfFloat == 0) {
-                sampledCovarianceA = texture(covariancesTexture, getDataUVF(nearestEvenIndex, 1.5, oddOffset,
-                                                                            covariancesTextureSize));
-                sampledCovarianceB = texture(covariancesTexture, getDataUVF(nearestEvenIndex, 1.5, oddOffset + uint(1),
-                                                                            covariancesTextureSize));
-
-                cov3D_M11_M12_M13 = vec3(sampledCovarianceA.rgb) * (1.0 - fOddOffset) +
-                                    vec3(sampledCovarianceA.ba, sampledCovarianceB.r) * fOddOffset;
-                cov3D_M22_M23_M33 = vec3(sampledCovarianceA.a, sampledCovarianceB.rg) * (1.0 - fOddOffset) +
-                                    vec3(sampledCovarianceB.gba) * fOddOffset;
-            } else {
-                uvec4 sampledCovarianceU = texture(covariancesTextureHalfFloat, getDataUV(1, 0, covariancesTextureSize));
-                fromCovarianceHalfFloatV4(sampledCovarianceU, sampledCovarianceA, sampledCovarianceB);
-                cov3D_M11_M12_M13 = sampledCovarianceA.rgb;
-                cov3D_M22_M23_M33 = vec3(sampledCovarianceA.a, sampledCovarianceB.rg);
-            }
-        
-            // Construct the 3D covariance matrix
-            mat3 Vrk = mat3(
-                cov3D_M11_M12_M13.x, cov3D_M11_M12_M13.y, cov3D_M11_M12_M13.z,
-                cov3D_M11_M12_M13.y, cov3D_M22_M23_M33.x, cov3D_M22_M23_M33.y,
-                cov3D_M11_M12_M13.z, cov3D_M22_M23_M33.y, cov3D_M22_M23_M33.z
-            );
-
-            mat3 J;
-            if (orthographicMode == 1) {
-                // Since the projection is linear, we don't need an approximation
-                J = transpose(mat3(orthoZoom, 0.0, 0.0,
-                                0.0, orthoZoom, 0.0,
-                                0.0, 0.0, 0.0));
-            } else {
-                // Construct the Jacobian of the affine approximation of the projection matrix. It will be used to transform the
-                // 3D covariance matrix instead of using the actual projection matrix because that transformation would
-                // require a non-linear component (perspective division) which would yield a non-gaussian result.
-                float s = 1.0 / (viewCenter.z * viewCenter.z);
-                J = mat3(
-                    focal.x / viewCenter.z, 0., -(focal.x * viewCenter.x) * s,
-                    0., focal.y / viewCenter.z, -(focal.y * viewCenter.y) * s,
-                    0., 0., 0.
-                );
-            }
-
-            // Concatenate the projection approximation with the model-view transformation
-            mat3 W = transpose(mat3(transformModelViewMatrix));
-            mat3 T = W * J;
-
-            // Transform the 3D covariance matrix (Vrk) to compute the 2D covariance matrix
-            mat3 cov2Dm = transpose(T) * Vrk * T;
-            `;
-
-            if (antialiased) {
-                vertexShaderSource += `
-                float detOrig = cov2Dm[0][0] * cov2Dm[1][1] - cov2Dm[0][1] * cov2Dm[0][1];
-                cov2Dm[0][0] += ${kernel2DSize};
-                cov2Dm[1][1] += ${kernel2DSize};
-                float detBlur = cov2Dm[0][0] * cov2Dm[1][1] - cov2Dm[0][1] * cov2Dm[0][1];
-                vColor.a *= sqrt(max(detOrig / detBlur, 0.0));
-                if (vColor.a < minAlpha) return;
-            `;
-            } else {
-                vertexShaderSource += `
-                cov2Dm[0][0] += ${kernel2DSize};
-                cov2Dm[1][1] += ${kernel2DSize};
-            `;
-            }
-
-            vertexShaderSource += `
-
-            // We are interested in the upper-left 2x2 portion of the projected 3D covariance matrix because
-            // we only care about the X and Y values. We want the X-diagonal, cov2Dm[0][0],
-            // the Y-diagonal, cov2Dm[1][1], and the correlation between the two cov2Dm[0][1]. We don't
-            // need cov2Dm[1][0] because it is a symetric matrix.
-            vec3 cov2Dv = vec3(cov2Dm[0][0], cov2Dm[0][1], cov2Dm[1][1]);
-
-            // We now need to solve for the eigen-values and eigen vectors of the 2D covariance matrix
-            // so that we can determine the 2D basis for the splat. This is done using the method described
-            // here: https://people.math.harvard.edu/~knill/teaching/math21b2004/exhibits/2dmatrices/index.html
-            // After calculating the eigen-values and eigen-vectors, we calculate the basis for rendering the splat
-            // by normalizing the eigen-vectors and then multiplying them by (sqrt(8) * sqrt(eigen-value)), which is
-            // equal to scaling them by sqrt(8) standard deviations.
-            //
-            // This is a different approach than in the original work at INRIA. In that work they compute the
-            // max extents of the projected splat in screen space to form a screen-space aligned bounding rectangle
-            // which forms the geometry that is actually rasterized. The dimensions of that bounding box are 3.0
-            // times the square root of the maximum eigen-value, or 3 standard deviations. They then use the inverse
-            // 2D covariance matrix (called 'conic') in the CUDA rendering thread to determine fragment opacity by
-            // calculating the full gaussian: exp(-0.5 * (X - mean) * conic * (X - mean)) * splat opacity
-            float a = cov2Dv.x;
-            float d = cov2Dv.z;
-            float b = cov2Dv.y;
-            float D = a * d - b * b;
-            float trace = a + d;
-            float traceOver2 = 0.5 * trace;
-            float term2 = sqrt(max(0.1f, traceOver2 * traceOver2 - D));
-            float eigenValue1 = traceOver2 + term2;
-            float eigenValue2 = traceOver2 - term2;
-
-            if (pointCloudModeEnabled == 1) {
-                eigenValue1 = eigenValue2 = 0.2;
-            }
-
-            if (eigenValue2 <= 0.0) return;
-
-            vec2 eigenVector1 = normalize(vec2(b, eigenValue1 - a));
-            // since the eigen vectors are orthogonal, we derive the second one from the first
-            vec2 eigenVector2 = vec2(eigenVector1.y, -eigenVector1.x);
-
-            // We use sqrt(8) standard deviations instead of 3 to eliminate more of the splat with a very low opacity.
-            vec2 basisVector1 = eigenVector1 * splatScale * min(sqrt8 * sqrt(eigenValue1), ${parseInt(maxScreenSpaceSplatSize)}.0);
-            vec2 basisVector2 = eigenVector2 * splatScale * min(sqrt8 * sqrt(eigenValue2), ${parseInt(maxScreenSpaceSplatSize)}.0);
-            `;
-
-            if (enableOptionalEffects) {
-                vertexShaderSource += `
-                vColor.a *= splatOpacityFromScene;
-            `;
-            }
-
-            vertexShaderSource += `
-            vec2 ndcOffset = vec2(vPosition.x * basisVector1 + vPosition.y * basisVector2) *
-                             basisViewport * 2.0 * inverseFocalAdjustment;
-
-            vec4 quadPos = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);
-            gl_Position = quadPos;
-
-            // Scale the position data we send to the fragment shader
-            vPosition *= sqrt8;
-        `;
-
-            vertexShaderSource += SplatMaterial.getVertexShaderFadeIn();
-            vertexShaderSource += `}`;
-
-            return vertexShaderSource;
-        }
-
-        static buildFragmentShader() {
-            let fragmentShaderSource = `
-            precision highp float;
-            #include <common>
- 
-            uniform vec3 debugColor;
-
-            varying vec4 vColor;
-            varying vec2 vUv;
-            varying vec2 vPosition;
-        `;
-
-            fragmentShaderSource += `
-            void main () {
-                // Compute the positional squared distance from the center of the splat to the current fragment.
-                float A = dot(vPosition, vPosition);
-                // Since the positional data in vPosition has been scaled by sqrt(8), the squared result will be
-                // scaled by a factor of 8. If the squared result is larger than 8, it means it is outside the ellipse
-                // defined by the rectangle formed by vPosition. It also means it's farther
-                // away than sqrt(8) standard deviations from the mean.
-                if (A > 8.0) discard;
-                vec3 color = vColor.rgb;
-
-                // Since the rendered splat is scaled by sqrt(8), the inverse covariance matrix that is part of
-                // the gaussian formula becomes the identity matrix. We're then left with (X - mean) * (X - mean),
-                // and since 'mean' is zero, we have X * X, which is the same as A:
-                float opacity = exp(-0.5 * A) * vColor.a;
-
-                gl_FragColor = vec4(color.rgb, opacity);
-            }
-        `;
-
-            return fragmentShaderSource;
-        }
-
-    }
-
-    class SplatMaterial2D {
-
-        /**
-         * Build the Three.js material that is used to render the splats.
-         * @param {number} dynamicMode If true, it means the scene geometry represented by this splat mesh is not stationary or
-         *                             that the splat count might change
-         * @param {boolean} enableOptionalEffects When true, allows for usage of extra properties and attributes in the shader for effects
-         *                                        such as opacity adjustment. Default is false for performance reasons.
-         * @param {number} splatScale Value by which all splats are scaled in screen-space (default is 1.0)
-         * @param {number} pointCloudModeEnabled Render all splats as screen-space circles
-         * @param {number} maxSphericalHarmonicsDegree Degree of spherical harmonics to utilize in rendering splats
-         * @return {THREE.ShaderMaterial}
-         */
-        static build(dynamicMode = false, enableOptionalEffects = false, splatScale = 1.0,
-                     pointCloudModeEnabled = false, maxSphericalHarmonicsDegree = 0) {
-
-            const customVertexVars = `
-            uniform vec2 scaleRotationsTextureSize;
-            uniform highp sampler2D scaleRotationsTexture;
-            varying mat3 vT;
-            varying vec2 vQuadCenter;
-            varying vec2 vFragCoord;
-        `;
-
-            let vertexShaderSource = SplatMaterial.buildVertexShaderBase(dynamicMode, enableOptionalEffects,
-                                                                         maxSphericalHarmonicsDegree, customVertexVars);
-            vertexShaderSource += SplatMaterial2D.buildVertexShaderProjection();
-            const fragmentShaderSource = SplatMaterial2D.buildFragmentShader();
-
-            const uniforms = SplatMaterial.getUniforms(dynamicMode, enableOptionalEffects,
-                                                       maxSphericalHarmonicsDegree, splatScale, pointCloudModeEnabled);
-
-            uniforms['scaleRotationsTexture'] = {
-                'type': 't',
-                'value': null
-            };
-            uniforms['scaleRotationsTextureSize'] = {
-                'type': 'v2',
-                'value': new THREE__namespace.Vector2(1024, 1024)
-            };
-
-            const material = new THREE__namespace.ShaderMaterial({
-                uniforms: uniforms,
-                vertexShader: vertexShaderSource,
-                fragmentShader: fragmentShaderSource,
-                transparent: true,
-                alphaTest: 1.0,
-                blending: THREE__namespace.NormalBlending,
-                depthTest: true,
-                depthWrite: false,
-                side: THREE__namespace.DoubleSide
-            });
-
-            return material;
-        }
-
-        static buildVertexShaderProjection() {
-
-            // Original CUDA code for calculating splat-to-screen transformation, for reference
-            /*
-                glm::mat3 R = quat_to_rotmat(rot);
-                glm::mat3 S = scale_to_mat(scale, mod);
-                glm::mat3 L = R * S;
-
-                // center of Gaussians in the camera coordinate
-                glm::mat3x4 splat2world = glm::mat3x4(
-                    glm::vec4(L[0], 0.0),
-                    glm::vec4(L[1], 0.0),
-                    glm::vec4(p_orig.x, p_orig.y, p_orig.z, 1)
-                );
-
-                glm::mat4 world2ndc = glm::mat4(
-                    projmatrix[0], projmatrix[4], projmatrix[8], projmatrix[12],
-                    projmatrix[1], projmatrix[5], projmatrix[9], projmatrix[13],
-                    projmatrix[2], projmatrix[6], projmatrix[10], projmatrix[14],
-                    projmatrix[3], projmatrix[7], projmatrix[11], projmatrix[15]
-                );
-
-                glm::mat3x4 ndc2pix = glm::mat3x4(
-                    glm::vec4(float(W) / 2.0, 0.0, 0.0, float(W-1) / 2.0),
-                    glm::vec4(0.0, float(H) / 2.0, 0.0, float(H-1) / 2.0),
-                    glm::vec4(0.0, 0.0, 0.0, 1.0)
-                );
-
-                T = glm::transpose(splat2world) * world2ndc * ndc2pix;
-                normal = transformVec4x3({L[2].x, L[2].y, L[2].z}, viewmatrix);
-            */
-
-            // Compute a 2D-to-2D mapping matrix from a tangent plane into a image plane
-            // given a 2D gaussian parameters. T = WH (from the paper: https://arxiv.org/pdf/2403.17888)
-            let vertexShaderSource = `
-
-            vec4 scaleRotationA = texture(scaleRotationsTexture, getDataUVF(nearestEvenIndex, 1.5,
-                                                                            oddOffset, scaleRotationsTextureSize));
-            vec4 scaleRotationB = texture(scaleRotationsTexture, getDataUVF(nearestEvenIndex, 1.5,
-                                                                            oddOffset + uint(1), scaleRotationsTextureSize));
-
-            vec3 scaleRotation123 = vec3(scaleRotationA.rgb) * (1.0 - fOddOffset) +
-                                    vec3(scaleRotationA.ba, scaleRotationB.r) * fOddOffset;
-            vec3 scaleRotation456 = vec3(scaleRotationA.a, scaleRotationB.rg) * (1.0 - fOddOffset) +
-                                    vec3(scaleRotationB.gba) * fOddOffset;
-
-            float missingW = sqrt(1.0 - scaleRotation456.x * scaleRotation456.x - scaleRotation456.y *
-                                    scaleRotation456.y - scaleRotation456.z * scaleRotation456.z);
-            mat3 R = quaternionToRotationMatrix(scaleRotation456.r, scaleRotation456.g, scaleRotation456.b, missingW);
-            mat3 S = mat3(scaleRotation123.r, 0.0, 0.0,
-                            0.0, scaleRotation123.g, 0.0,
-                            0.0, 0.0, scaleRotation123.b);
-            
-            mat3 L = R * S;
-
-            mat3x4 splat2World = mat3x4(vec4(L[0], 0.0),
-                                        vec4(L[1], 0.0),
-                                        vec4(splatCenter.x, splatCenter.y, splatCenter.z, 1.0));
-
-            mat4 world2ndc = transpose(projectionMatrix * transformModelViewMatrix);
-
-            mat3x4 ndc2pix = mat3x4(vec4(viewport.x / 2.0, 0.0, 0.0, (viewport.x - 1.0) / 2.0),
-                                    vec4(0.0, viewport.y / 2.0, 0.0, (viewport.y - 1.0) / 2.0),
-                                    vec4(0.0, 0.0, 0.0, 1.0));
-
-            mat3 T = transpose(splat2World) * world2ndc * ndc2pix;
-            vec3 normal = vec3(viewMatrix * vec4(L[0][2], L[1][2], L[2][2], 0.0));
-        `;
-
-            // Original CUDA code for projection to 2D, for reference
-            /*
-                float3 T0 = {T[0][0], T[0][1], T[0][2]};
-                float3 T1 = {T[1][0], T[1][1], T[1][2]};
-                float3 T3 = {T[2][0], T[2][1], T[2][2]};
-
-                // Compute AABB
-                float3 temp_point = {1.0f, 1.0f, -1.0f};
-                float distance = sumf3(T3 * T3 * temp_point);
-                float3 f = (1 / distance) * temp_point;
-                if (distance == 0.0) return false;
-
-                point_image = {
-                    sumf3(f * T0 * T3),
-                    sumf3(f * T1 * T3)
-                };
-
-                float2 temp = {
-                    sumf3(f * T0 * T0),
-                    sumf3(f * T1 * T1)
-                };
-                float2 half_extend = point_image * point_image - temp;
-                extent = sqrtf2(maxf2(1e-4, half_extend));
-                return true;
-            */
-
-            // Computing the bounding box of the 2D Gaussian and its center
-            // The center of the bounding box is used to create a low pass filter.
-            // This code is based off the reference implementation and creates an AABB aligned
-            // with the screen for the quad to be rendered.
-            const referenceQuadGeneration = `
-            vec3 T0 = vec3(T[0][0], T[0][1], T[0][2]);
-            vec3 T1 = vec3(T[1][0], T[1][1], T[1][2]);
-            vec3 T3 = vec3(T[2][0], T[2][1], T[2][2]);
-
-            vec3 tempPoint = vec3(1.0, 1.0, -1.0);
-            float distance = (T3.x * T3.x * tempPoint.x) + (T3.y * T3.y * tempPoint.y) + (T3.z * T3.z * tempPoint.z);
-            vec3 f = (1.0 / distance) * tempPoint;
-            if (abs(distance) < 0.00001) return;
-
-            float pointImageX = (T0.x * T3.x * f.x) + (T0.y * T3.y * f.y) + (T0.z * T3.z * f.z);
-            float pointImageY = (T1.x * T3.x * f.x) + (T1.y * T3.y * f.y) + (T1.z * T3.z * f.z);
-            vec2 pointImage = vec2(pointImageX, pointImageY);
-
-            float tempX = (T0.x * T0.x * f.x) + (T0.y * T0.y * f.y) + (T0.z * T0.z * f.z);
-            float tempY = (T1.x * T1.x * f.x) + (T1.y * T1.y * f.y) + (T1.z * T1.z * f.z);
-            vec2 temp = vec2(tempX, tempY);
-
-            vec2 halfExtend = pointImage * pointImage - temp;
-            vec2 extent = sqrt(max(vec2(0.0001), halfExtend));
-            float radius = max(extent.x, extent.y);
-
-            vec2 ndcOffset = ((position.xy * radius * 3.0) * basisViewport * 2.0);
-
-            vec4 quadPos = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);
-            gl_Position = quadPos;
-
-            vT = T;
-            vQuadCenter = pointImage;
-            vFragCoord = (quadPos.xy * 0.5 + 0.5) * viewport;
-        `;
-
-            const useRefImplementation = false;
-            if (useRefImplementation) {
-                vertexShaderSource += referenceQuadGeneration;
-            } else {
-                // Create a quad that is aligned with the eigen vectors of the projected gaussian for rendering.
-                // This is a different approach than the reference implementation, similar to how the rendering of
-                // 3D gaussians in this viewer differs from the reference implementation. If the quad is too small
-                // (smaller than a pixel), then revert to the reference implementation.
-                vertexShaderSource += `
-
-                mat4 splat2World4 = mat4(vec4(L[0], 0.0),
-                                        vec4(L[1], 0.0),
-                                        vec4(L[2], 0.0),
-                                        vec4(splatCenter.x, splatCenter.y, splatCenter.z, 1.0));
-
-                mat4 Tt = transpose(transpose(splat2World4) * world2ndc);
-
-                vec4 tempPoint1 = Tt * vec4(1.0, 0.0, 0.0, 1.0);
-                tempPoint1 /= tempPoint1.w;
-
-                vec4 tempPoint2 = Tt * vec4(0.0, 1.0, 0.0, 1.0);
-                tempPoint2 /= tempPoint2.w;
-
-                vec4 center = Tt * vec4(0.0, 0.0, 0.0, 1.0);
-                center /= center.w;
-
-                vec2 basisVector1 = tempPoint1.xy - center.xy;
-                vec2 basisVector2 = tempPoint2.xy - center.xy;
-
-                vec2 basisVector1Screen = basisVector1 * 0.5 * viewport;
-                vec2 basisVector2Screen = basisVector2 * 0.5 * viewport;
-
-                const float minPix = 1.;
-                if (length(basisVector1Screen) < minPix || length(basisVector2Screen) < minPix) {
-                    ${referenceQuadGeneration}
-                } else {
-                    vec2 ndcOffset = vec2(position.x * basisVector1 + position.y * basisVector2) * 3.0 * inverseFocalAdjustment;
-                    vec4 quadPos = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);
-                    gl_Position = quadPos;
-
-                    vT = T;
-                    vQuadCenter = center.xy;
-                    vFragCoord = (quadPos.xy * 0.5 + 0.5) * viewport;
-                }
-            `;
-            }
-
-            vertexShaderSource += SplatMaterial.getVertexShaderFadeIn();
-            vertexShaderSource += `}`;
-
-            return vertexShaderSource;
-        }
-
-        static buildFragmentShader() {
-
-            // Original CUDA code for splat intersection, for reference
-            /*
-                const float2 xy = collected_xy[j];
-                const float3 Tu = collected_Tu[j];
-                const float3 Tv = collected_Tv[j];
-                const float3 Tw = collected_Tw[j];
-                float3 k = pix.x * Tw - Tu;
-                float3 l = pix.y * Tw - Tv;
-                float3 p = cross(k, l);
-                if (p.z == 0.0) continue;
-                float2 s = {p.x / p.z, p.y / p.z};
-                float rho3d = (s.x * s.x + s.y * s.y);
-                float2 d = {xy.x - pixf.x, xy.y - pixf.y};
-                float rho2d = FilterInvSquare * (d.x * d.x + d.y * d.y);
-
-                // compute intersection and depth
-                float rho = min(rho3d, rho2d);
-                float depth = (rho3d <= rho2d) ? (s.x * Tw.x + s.y * Tw.y) + Tw.z : Tw.z;
-                if (depth < near_n) continue;
-                float4 nor_o = collected_normal_opacity[j];
-                float normal[3] = {nor_o.x, nor_o.y, nor_o.z};
-                float opa = nor_o.w;
-
-                float power = -0.5f * rho;
-                if (power > 0.0f)
-                    continue;
-
-                // Eq. (2) from 3D Gaussian splatting paper.
-                // Obtain alpha by multiplying with Gaussian opacity
-                // and its exponential falloff from mean.
-                // Avoid numerical instabilities (see paper appendix).
-                float alpha = min(0.99f, opa * exp(power));
-                if (alpha < 1.0f / 255.0f)
-                    continue;
-                float test_T = T * (1 - alpha);
-                if (test_T < 0.0001f)
-                {
-                    done = true;
-                    continue;
-                }
-
-                float w = alpha * T;
-            */
-            let fragmentShaderSource = `
-            precision highp float;
-            #include <common>
-
-            uniform vec3 debugColor;
-
-            varying vec4 vColor;
-            varying vec2 vUv;
-            varying vec2 vPosition;
-            varying mat3 vT;
-            varying vec2 vQuadCenter;
-            varying vec2 vFragCoord;
-
-            void main () {
-
-                const float FilterInvSquare = 2.0;
-                const float near_n = 0.2;
-                const float T = 1.0;
-
-                vec2 xy = vQuadCenter;
-                vec3 Tu = vT[0];
-                vec3 Tv = vT[1];
-                vec3 Tw = vT[2];
-                vec3 k = vFragCoord.x * Tw - Tu;
-                vec3 l = vFragCoord.y * Tw - Tv;
-                vec3 p = cross(k, l);
-                if (p.z == 0.0) discard;
-                vec2 s = vec2(p.x / p.z, p.y / p.z);
-                float rho3d = (s.x * s.x + s.y * s.y); 
-                vec2 d = vec2(xy.x - vFragCoord.x, xy.y - vFragCoord.y);
-                float rho2d = FilterInvSquare * (d.x * d.x + d.y * d.y); 
-
-                // compute intersection and depth
-                float rho = min(rho3d, rho2d);
-                float depth = (rho3d <= rho2d) ? (s.x * Tw.x + s.y * Tw.y) + Tw.z : Tw.z; 
-                if (depth < near_n) discard;
-                //  vec4 nor_o = collected_normal_opacity[j];
-                //  float normal[3] = {nor_o.x, nor_o.y, nor_o.z};
-                float opa = vColor.a;
-
-                float power = -0.5f * rho;
-                if (power > 0.0f) discard;
-
-                // Eq. (2) from 3D Gaussian splatting paper.
-                // Obtain alpha by multiplying with Gaussian opacity
-                // and its exponential falloff from mean.
-                // Avoid numerical instabilities (see paper appendix). 
-                float alpha = min(0.99f, opa * exp(power));
-                if (alpha < 1.0f / 255.0f) discard;
-                float test_T = T * (1.0 - alpha);
-                if (test_T < 0.0001)discard;
-
-                float w = alpha * T;
-                gl_FragColor = vec4(vColor.rgb, w);
-            }
-        `;
-
-            return fragmentShaderSource;
-        }
-    }
-
-    class SplatGeometry {
-
-        /**
-         * Build the Three.js geometry that will be used to render the splats. The geometry is instanced and is made up of
-         * vertices for a single quad as well as an attribute buffer for the splat indexes.
-         * @param {number} maxSplatCount The maximum number of splats that the geometry will need to accomodate
-         * @return {THREE.InstancedBufferGeometry}
-         */
-        static build(maxSplatCount) {
-
-            const baseGeometry = new THREE__namespace.BufferGeometry();
-            baseGeometry.setIndex([0, 1, 2, 0, 2, 3]);
-
-            // Vertices for the instanced quad
-            const positionsArray = new Float32Array(4 * 3);
-            const positions = new THREE__namespace.BufferAttribute(positionsArray, 3);
-            baseGeometry.setAttribute('position', positions);
-            positions.setXYZ(0, -1.0, -1.0, 0.0);
-            positions.setXYZ(1, -1.0, 1.0, 0.0);
-            positions.setXYZ(2, 1.0, 1.0, 0.0);
-            positions.setXYZ(3, 1.0, -1.0, 0.0);
-            positions.needsUpdate = true;
-
-            const geometry = new THREE__namespace.InstancedBufferGeometry().copy(baseGeometry);
-
-            // Splat index buffer
-            const splatIndexArray = new Uint32Array(maxSplatCount);
-            const splatIndexes = new THREE__namespace.InstancedBufferAttribute(splatIndexArray, 1, false);
-            splatIndexes.setUsage(THREE__namespace.DynamicDrawUsage);
-            geometry.setAttribute('splatIndex', splatIndexes);
-
-            geometry.instanceCount = 0;
-
-            return geometry;
-        }
-    }
-
     /**
      * SplatScene: Descriptor for a single splat scene managed by an instance of SplatMesh.
      */
-    class SplatScene extends THREE__namespace.Object3D {
+    class SplatScene {
 
         constructor(splatBuffer, position = new THREE__namespace.Vector3(), quaternion = new THREE__namespace.Quaternion(),
-                    scale = new THREE__namespace.Vector3(1, 1, 1), minimumAlpha = 1, opacity = 1.0, visible = true) {
-            super();
+                    scale = new THREE__namespace.Vector3(1, 1, 1), minimumAlpha = 1) {
             this.splatBuffer = splatBuffer;
-            this.position.copy(position);
-            this.quaternion.copy(quaternion);
-            this.scale.copy(scale);
+            this.position = position.clone();
+            this.quaternion = quaternion.clone();
+            this.scale = scale.clone();
             this.transform = new THREE__namespace.Matrix4();
             this.minimumAlpha = minimumAlpha;
-            this.opacity = opacity;
-            this.visible = visible;
+            this.updateTransform();
         }
 
         copyTransformData(otherScene) {
@@ -8722,14 +5912,8 @@
             this.transform.copy(otherScene.transform);
         }
 
-        updateTransform(dynamicMode) {
-            if (dynamicMode) {
-                if (this.matrixWorldAutoUpdate) this.updateWorldMatrix(true, false);
-                this.transform.copy(this.matrixWorld);
-            } else {
-                if (this.matrixAutoUpdate) this.updateMatrix();
-                this.transform.copy(this.matrix);
-            }
+        updateTransform() {
+            this.transform.compose(this.position, this.quaternion, this.scale);
         }
     }
 
@@ -9427,26 +6611,14 @@
     const COVARIANCES_ELEMENTS_PER_SPLAT = 6;
     const CENTER_COLORS_ELEMENTS_PER_SPLAT = 4;
 
-    const COVARIANCES_ELEMENTS_PER_TEXEL_STORED = 4;
-    const COVARIANCES_ELEMENTS_PER_TEXEL_ALLOCATED = 4;
-    const COVARIANCES_ELEMENTS_PER_TEXEL_COMPRESSED_STORED = 6;
-    const COVARIANCES_ELEMENTS_PER_TEXEL_COMPRESSED_ALLOCATED = 8;
-    const SCALES_ROTATIONS_ELEMENTS_PER_TEXEL = 4;
+    const COVARIANCES_ELEMENTS_PER_TEXEL = 4;
     const CENTER_COLORS_ELEMENTS_PER_TEXEL = 4;
-    const SCENE_INDEXES_ELEMENTS_PER_TEXEL = 1;
+    const TRANSFORM_INDEXES_ELEMENTS_PER_TEXEL = 1;
 
     const SCENE_FADEIN_RATE_FAST = 0.012;
     const SCENE_FADEIN_RATE_GRADUAL = 0.003;
 
     const VISIBLE_REGION_EXPANSION_DELTA = 1;
-
-    // Based on my own observations across multiple devices, OSes and browsers, using textures that have one dimension
-    // greater than 4096 while the other is greater than or equal to 4096 causes issues (Essentially any texture larger
-    // than 4096 x 4096 (16777216) texels). Specifically it seems all texture data beyond the 4096 x 4096 texel boundary
-    // is corrupted, while data below that boundary is usable. In these cases the texture has been valid in the eyes of
-    // both Three.js and WebGL, and the texel format (RG, RGBA, etc.) has not mattered. More investigation will be needed,
-    // but for now the work-around is to split the spherical harmonics into three textures (one for each color channel).
-    const MAX_TEXTURE_TEXELS = 16777216;
 
     /**
      * SplatMesh: Container for one or more splat scenes, abstracting them into a single unified container for
@@ -9454,88 +6626,58 @@
      */
     class SplatMesh extends THREE__namespace.Mesh {
 
-        constructor(splatRenderMode = SplatRenderMode.ThreeD, dynamicMode = false, enableOptionalEffects = false,
-                    halfPrecisionCovariancesOnGPU = false, devicePixelRatio = 1, enableDistancesComputationOnGPU = true,
-                    integerBasedDistancesComputation = false, antialiased = false, maxScreenSpaceSplatSize = 1024, logLevel = LogLevel.None,
-                    sphericalHarmonicsDegree = 0, sceneFadeInRateMultiplier = 1.0, kernel2DSize = 0.3) {
+        constructor(dynamicMode = true, halfPrecisionCovariancesOnGPU = false, devicePixelRatio = 1,
+                    enableDistancesComputationOnGPU = true, integerBasedDistancesComputation = false,
+                    antialiased = false, maxScreenSpaceSplatSize = 2048, logLevel = LogLevel.None, sphericalHarmonicsDegree = 0) {
             super(dummyGeometry, dummyMaterial);
-
             // Reference to a Three.js renderer
             this.renderer = undefined;
-
-            // Determine how the splats are rendered
-            this.splatRenderMode = splatRenderMode;
-
+            // Use 16-bit floating point values when storing splat covariance data in textures, instead of 32-bit
+            this.halfPrecisionCovariancesOnGPU = halfPrecisionCovariancesOnGPU;
             // When 'dynamicMode' is true, scenes are assumed to be non-static. Dynamic scenes are handled differently
             // and certain optimizations cannot be made for them. Additionally, by default, all splat data retrieved from
             // this splat mesh will not have their scene transform applied to them if the splat mesh is dynamic. That
             // can be overriden via parameters to the individual functions that are used to retrieve splat data.
             this.dynamicMode = dynamicMode;
-
-            // When true, allows for usage of extra properties and attributes during rendering for effects such as opacity adjustment.
-            // Default is false for performance reasons. These properties are separate from transform properties (scale, rotation, position)
-            // that are enabled by the 'dynamicScene' parameter.
-            this.enableOptionalEffects = enableOptionalEffects;
-
-            // Use 16-bit floating point values when storing splat covariance data in textures, instead of 32-bit
-            this.halfPrecisionCovariancesOnGPU = halfPrecisionCovariancesOnGPU;
-
             // Ratio of the resolution in physical pixels to the resolution in CSS pixels for the current display device
             this.devicePixelRatio = devicePixelRatio;
-
             // Use a transform feedback to calculate splat distances from the camera
             this.enableDistancesComputationOnGPU = enableDistancesComputationOnGPU;
-
             // Use a faster integer-based approach for calculating splat distances from the camera
             this.integerBasedDistancesComputation = integerBasedDistancesComputation;
-
             // When true, will perform additional steps during rendering to address artifacts caused by the rendering of gaussians at a
             // substantially different resolution than that at which they were rendered during training. This will only work correctly
             // for models that were trained using a process that utilizes this compensation calculation. For more details:
             // https://github.com/nerfstudio-project/gsplat/pull/117
             // https://github.com/graphdeco-inria/gaussian-splatting/issues/294#issuecomment-1772688093
             this.antialiased = antialiased;
-
-            // The size of the 2D kernel used for splat rendering
-            // This will adjust the 2D kernel size after the projection
-            this.kernel2DSize = kernel2DSize;
-
             // Specify the maximum clip space splat size, can help deal with large splats that get too unwieldy
             this.maxScreenSpaceSplatSize = maxScreenSpaceSplatSize;
-
             // The verbosity of console logging
             this.logLevel = logLevel;
-
             // Degree 0 means no spherical harmonics
             this.sphericalHarmonicsDegree = sphericalHarmonicsDegree;
             this.minSphericalHarmonicsDegree = 0;
-
-            this.sceneFadeInRateMultiplier = sceneFadeInRateMultiplier;
-
             // The individual splat scenes stored in this splat mesh, each containing their own transform
             this.scenes = [];
-
             // Special octree tailored to SplatMesh instances
             this.splatTree = null;
             this.baseSplatTree = null;
-
-            // Cache textures and the intermediate data used to populate them
+            // Textures in which splat data will be stored for rendering
             this.splatDataTextures = {};
-
             this.distancesTransformFeedback = {
                 'id': null,
                 'vertexShader': null,
                 'fragmentShader': null,
                 'program': null,
                 'centersBuffer': null,
-                'sceneIndexesBuffer': null,
+                'transformIndexesBuffer': null,
                 'outDistancesBuffer': null,
                 'centersLoc': -1,
                 'modelViewProjLoc': -1,
-                'sceneIndexesLoc': -1,
+                'transformIndexesLoc': -1,
                 'transformsLocs': []
             };
-
             this.globalSplatIndexToLocalSplatIndexMap = [];
             this.globalSplatIndexToSceneIndexMap = [];
 
@@ -9565,6 +6707,566 @@
         }
 
         /**
+         * Build the Three.js material that is used to render the splats.
+         * @param {number} dynamicMode If true, it means the scene geometry represented by this splat mesh is not stationary or
+         *                             that the splat count might change
+         * @param {boolean} antialiased If true, calculate compensation factor to deal with gaussians being rendered at a significantly
+         *                              different resolution than that of their training
+         * @param {number} maxScreenSpaceSplatSize The maximum clip space splat size
+         * @param {number} splatScale Value by which all splats are scaled in screen-space (default is 1.0)
+         * @param {number} pointCloudModeEnabled Render all splats as screen-space circles
+         * @param {number} maxSphericalHarmonicsDegree Degree of spherical harmonics to utilize in rendering splats
+         * @return {THREE.ShaderMaterial}
+         */
+        static buildMaterial(dynamicMode = false, antialiased = false, maxScreenSpaceSplatSize = 2048,
+                             splatScale = 1.0, pointCloudModeEnabled = false, maxSphericalHarmonicsDegree = 0) {
+
+            // Contains the code to project 3D covariance to 2D and from there calculate the quad (using the eigen vectors of the
+            // 2D covariance) that is ultimately rasterized
+            let vertexShaderSource = `
+            precision highp float;
+            #include <common>
+
+            attribute uint splatIndex;
+
+            uniform highp sampler2D covariancesTexture;
+            uniform highp usampler2D centersColorsTexture;
+            uniform highp sampler2D sphericalHarmonicsTexture;`;
+
+            if (dynamicMode) {
+                vertexShaderSource += `
+                uniform highp usampler2D transformIndexesTexture;
+                uniform highp mat4 transforms[${Constants.MaxScenes}];
+                uniform vec2 transformIndexesTextureSize;
+            `;
+            }
+
+            vertexShaderSource += `
+            uniform vec2 focal;
+            uniform float orthoZoom;
+            uniform int orthographicMode;
+            uniform int pointCloudModeEnabled;
+            uniform float inverseFocalAdjustment;
+            uniform vec2 viewport;
+            uniform vec2 basisViewport;
+            uniform vec2 covariancesTextureSize;
+            uniform vec2 centersColorsTextureSize;
+            uniform int sphericalHarmonicsDegree;
+            uniform vec2 sphericalHarmonicsTextureSize;
+            uniform int sphericalHarmonics8BitMode;
+            uniform float visibleRegionRadius;
+            uniform float visibleRegionFadeStartRadius;
+            uniform float firstRenderTime;
+            uniform float currentTime;
+            uniform int fadeInComplete;
+            uniform vec3 sceneCenter;
+            uniform float splatScale;
+
+            varying vec4 vColor;
+            varying vec2 vUv;
+
+            varying vec2 vPosition;
+
+            const float sqrt8 = sqrt(8.0);
+            const float minAlpha = 1.0 / 255.0;
+
+            const vec4 encodeNorm4 = vec4(1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0, 1.0 / 255.0);
+            const uvec4 mask4 = uvec4(uint(0x000000FF), uint(0x0000FF00), uint(0x00FF0000), uint(0xFF000000));
+            const uvec4 shift4 = uvec4(0, 8, 16, 24);
+            vec4 uintToRGBAVec (uint u) {
+               uvec4 urgba = mask4 & u;
+               urgba = urgba >> shift4;
+               vec4 rgba = vec4(urgba) * encodeNorm4;
+               return rgba;
+            }
+
+            vec2 getDataUV(in int stride, in int offset, in vec2 dimensions) {
+                vec2 samplerUV = vec2(0.0, 0.0);
+                float d = float(splatIndex * uint(stride) + uint(offset)) / dimensions.x;
+                samplerUV.y = float(floor(d)) / dimensions.y;
+                samplerUV.x = fract(d);
+                return samplerUV;
+            }
+
+            vec2 getDataUVF(in uint sIndex, in float stride, in uint offset, in vec2 dimensions) {
+                vec2 samplerUV = vec2(0.0, 0.0);
+                float d = float(uint(float(sIndex) * stride) + offset) / dimensions.x;
+                samplerUV.y = float(floor(d)) / dimensions.y;
+                samplerUV.x = fract(d);
+                return samplerUV;
+            }
+
+            const float SH_C1 = 0.4886025119029199f;
+            const float[5] SH_C2 = float[](1.0925484, -1.0925484, 0.3153916, -1.0925484, 0.5462742);
+
+            const float SphericalHarmonics8BitCompressionRange = ${Constants.SphericalHarmonics8BitCompressionRange.toFixed(1)};
+            const float SphericalHarmonics8BitCompressionHalfRange = SphericalHarmonics8BitCompressionRange / 2.0;
+            const vec3 vec8BitSHShift = vec3(SphericalHarmonics8BitCompressionHalfRange);
+
+            void main () {
+
+                uint oddOffset = splatIndex & uint(0x00000001);
+                uint doubleOddOffset = oddOffset * uint(2);
+                bool isEven = oddOffset == uint(0);
+                uint nearestEvenIndex = splatIndex - oddOffset;
+                float fOddOffset = float(oddOffset);
+
+                uvec4 sampledCenterColor = texture(centersColorsTexture, getDataUV(1, 0, centersColorsTextureSize));
+                vec3 splatCenter = uintBitsToFloat(uvec3(sampledCenterColor.gba));`;
+
+                if (dynamicMode) {
+                    vertexShaderSource += `
+                    uint transformIndex = texture(transformIndexesTexture, getDataUV(1, 0, transformIndexesTextureSize)).r;
+                    mat4 transform = transforms[transformIndex];
+                    mat4 transformModelViewMatrix = modelViewMatrix * transform;
+                `;
+                } else {
+                    vertexShaderSource += `mat4 transformModelViewMatrix = modelViewMatrix;`;
+                }
+
+                vertexShaderSource += `
+                vec4 viewCenter = transformModelViewMatrix * vec4(splatCenter, 1.0);
+
+                vec4 clipCenter = projectionMatrix * viewCenter;
+
+                float clip = 1.2 * clipCenter.w;
+                if (clipCenter.z < -clip || clipCenter.x < -clip || clipCenter.x > clip || clipCenter.y < -clip || clipCenter.y > clip) {
+                    gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+                    return;
+                }
+
+                vPosition = position.xy;
+                vColor = uintToRGBAVec(sampledCenterColor.r);
+            `;
+
+                if (maxSphericalHarmonicsDegree >= 1) {
+
+                    vertexShaderSource += `   
+                if (sphericalHarmonicsDegree >= 1) {
+                `;
+
+                    if (dynamicMode) {
+                        vertexShaderSource += `
+                        mat4 mTransform = modelMatrix * transform;
+                        vec3 worldViewDir = normalize(splatCenter - vec3(inverse(mTransform) * vec4(cameraPosition, 1.0)));
+                    `;
+                    } else {
+                        vertexShaderSource += `
+                        vec3 worldViewDir = normalize(splatCenter - cameraPosition);
+                    `;
+                    }
+
+                    if (maxSphericalHarmonicsDegree >= 2) {
+                        vertexShaderSource += `
+                        vec4 sampledSH0123 = texture(sphericalHarmonicsTexture, getDataUV(6, 0, sphericalHarmonicsTextureSize));
+                        vec4 sampledSH4567 = texture(sphericalHarmonicsTexture, getDataUV(6, 1, sphericalHarmonicsTextureSize));
+                        vec4 sampledSH891011 = texture(sphericalHarmonicsTexture, getDataUV(6, 2, sphericalHarmonicsTextureSize));
+                        vec3 sh1 = sampledSH0123.rgb;
+                        vec3 sh2 = vec3(sampledSH0123.a, sampledSH4567.rg);
+                        vec3 sh3 = vec3(sampledSH4567.ba, sampledSH891011.r);
+                    `;
+                    } else {
+                        vertexShaderSource += `
+                        vec2 shUV = getDataUVF(nearestEvenIndex, 2.5, doubleOddOffset, sphericalHarmonicsTextureSize);
+                        vec4 sampledSH0123 = texture(sphericalHarmonicsTexture, shUV);
+                        shUV = getDataUVF(nearestEvenIndex, 2.5, doubleOddOffset + uint(1), sphericalHarmonicsTextureSize);
+                        vec4 sampledSH4567 = texture(sphericalHarmonicsTexture, shUV);
+                        shUV = getDataUVF(nearestEvenIndex, 2.5, doubleOddOffset + uint(2), sphericalHarmonicsTextureSize);
+                        vec4 sampledSH891011 = texture(sphericalHarmonicsTexture, shUV);
+
+                        vec3 sh1 = vec3(sampledSH0123.rgb) * (1.0 - fOddOffset) + vec3(sampledSH0123.ba, sampledSH4567.r) * fOddOffset;
+                        vec3 sh2 = vec3(sampledSH0123.a, sampledSH4567.rg) * (1.0 - fOddOffset) + vec3(sampledSH4567.gba) * fOddOffset;
+                        vec3 sh3 = vec3(sampledSH4567.ba, sampledSH891011.r) * (1.0 - fOddOffset) + vec3(sampledSH891011.rgb) * fOddOffset;
+                    `;
+                    }
+
+                    vertexShaderSource += `
+                        if (sphericalHarmonics8BitMode == 1) {
+                            sh1 = sh1 * SphericalHarmonics8BitCompressionRange - vec8BitSHShift;
+                            sh2 = sh2 * SphericalHarmonics8BitCompressionRange - vec8BitSHShift;
+                            sh3 = sh3 * SphericalHarmonics8BitCompressionRange - vec8BitSHShift;
+                        }
+                        float x = worldViewDir.x;
+                        float y = worldViewDir.y;
+                        float z = worldViewDir.z;
+                        vColor.rgb += SH_C1 * (-sh1 * y + sh2 * z - sh3 * x);
+                `;
+
+                    if (maxSphericalHarmonicsDegree >= 2) {
+
+                        vertexShaderSource += `
+                        if (sphericalHarmonicsDegree >= 2) {
+                            float xx = x * x;
+                            float yy = y * y;
+                            float zz = z * z;
+                            float xy = x * y;
+                            float yz = y * z;
+                            float xz = x * z;
+
+                            vec4 sampledSH12131415 = texture(sphericalHarmonicsTexture, getDataUV(6, 3, sphericalHarmonicsTextureSize));
+                            vec4 sampledSH16171819 = texture(sphericalHarmonicsTexture, getDataUV(6, 4, sphericalHarmonicsTextureSize));
+                            vec4 sampledSH20212223 = texture(sphericalHarmonicsTexture, getDataUV(6, 5, sphericalHarmonicsTextureSize));
+
+                            vec3 sh4 = sampledSH891011.gba;
+                            vec3 sh5 = sampledSH12131415.rgb;
+                            vec3 sh6 = vec3(sampledSH12131415.a, sampledSH16171819.rg);
+                            vec3 sh7 = vec3(sampledSH16171819.ba, sampledSH20212223.r);
+                            vec3 sh8 = sampledSH20212223.gba;
+
+                            if (sphericalHarmonics8BitMode == 1) {
+                                sh4 = sh4 * SphericalHarmonics8BitCompressionRange - vec8BitSHShift;
+                                sh5 = sh5 * SphericalHarmonics8BitCompressionRange - vec8BitSHShift;
+                                sh6 = sh6 * SphericalHarmonics8BitCompressionRange - vec8BitSHShift;
+                                sh7 = sh7 * SphericalHarmonics8BitCompressionRange - vec8BitSHShift;
+                                sh8 = sh8 * SphericalHarmonics8BitCompressionRange - vec8BitSHShift;
+                            }
+
+                            vColor.rgb +=
+                                (SH_C2[0] * xy) * sh4 +
+                                (SH_C2[1] * yz) * sh5 +
+                                (SH_C2[2] * (2.0 * zz - xx - yy)) * sh6 +
+                                (SH_C2[3] * xz) * sh7 +
+                                (SH_C2[4] * (xx - yy)) * sh8;
+                        }
+                    `;
+                    }
+
+                    vertexShaderSource += `
+               
+                }
+
+                `;
+                }
+
+                vertexShaderSource += `
+
+                vec4 sampledCovarianceA = texture(covariancesTexture,
+                                                  getDataUVF(nearestEvenIndex, 1.5, oddOffset, covariancesTextureSize));
+                vec4 sampledCovarianceB = texture(covariancesTexture,
+                                                  getDataUVF(nearestEvenIndex, 1.5, oddOffset + uint(1), covariancesTextureSize));
+
+                vec3 cov3D_M11_M12_M13 = vec3(sampledCovarianceA.rgb) * (1.0 - fOddOffset) +
+                                         vec3(sampledCovarianceA.ba, sampledCovarianceB.r) * fOddOffset;
+                vec3 cov3D_M22_M23_M33 = vec3(sampledCovarianceA.a, sampledCovarianceB.rg) * (1.0 - fOddOffset) +
+                                         vec3(sampledCovarianceB.gba) * fOddOffset;
+
+                // Construct the 3D covariance matrix
+                mat3 Vrk = mat3(
+                    cov3D_M11_M12_M13.x, cov3D_M11_M12_M13.y, cov3D_M11_M12_M13.z,
+                    cov3D_M11_M12_M13.y, cov3D_M22_M23_M33.x, cov3D_M22_M23_M33.y,
+                    cov3D_M11_M12_M13.z, cov3D_M22_M23_M33.y, cov3D_M22_M23_M33.z
+                );
+
+                mat3 J;
+                if (orthographicMode == 1) {
+                    // Since the projection is linear, we don't need an approximation
+                    J = transpose(mat3(orthoZoom, 0.0, 0.0,
+                                       0.0, orthoZoom, 0.0,
+                                       0.0, 0.0, 0.0));
+                } else {
+                    // Construct the Jacobian of the affine approximation of the projection matrix. It will be used to transform the
+                    // 3D covariance matrix instead of using the actual projection matrix because that transformation would
+                    // require a non-linear component (perspective division) which would yield a non-gaussian result.
+                    float s = 1.0 / (viewCenter.z * viewCenter.z);
+                    J = mat3(
+                        focal.x / viewCenter.z, 0., -(focal.x * viewCenter.x) * s,
+                        0., focal.y / viewCenter.z, -(focal.y * viewCenter.y) * s,
+                        0., 0., 0.
+                    );
+                }
+
+                // Concatenate the projection approximation with the model-view transformation
+                mat3 W = transpose(mat3(transformModelViewMatrix));
+                mat3 T = W * J;
+
+                // Transform the 3D covariance matrix (Vrk) to compute the 2D covariance matrix
+                mat3 cov2Dm = transpose(T) * Vrk * T;
+                `;
+
+                if (antialiased) {
+                    vertexShaderSource += `
+                    float detOrig = cov2Dm[0][0] * cov2Dm[1][1] - cov2Dm[0][1] * cov2Dm[0][1];
+                    cov2Dm[0][0] += 0.3;
+                    cov2Dm[1][1] += 0.3;
+                    float detBlur = cov2Dm[0][0] * cov2Dm[1][1] - cov2Dm[0][1] * cov2Dm[0][1];
+                    float compensation = sqrt(max(detOrig / detBlur, 0.0));
+                `;
+                } else {
+                    vertexShaderSource += `
+                    cov2Dm[0][0] += 0.3;
+                    cov2Dm[1][1] += 0.3;
+                    float compensation = 1.0;
+                `;
+                }
+
+                vertexShaderSource += `
+
+                vColor.a *= compensation;
+
+                if (vColor.a < minAlpha) return;
+
+                // We are interested in the upper-left 2x2 portion of the projected 3D covariance matrix because
+                // we only care about the X and Y values. We want the X-diagonal, cov2Dm[0][0],
+                // the Y-diagonal, cov2Dm[1][1], and the correlation between the two cov2Dm[0][1]. We don't
+                // need cov2Dm[1][0] because it is a symetric matrix.
+                vec3 cov2Dv = vec3(cov2Dm[0][0], cov2Dm[0][1], cov2Dm[1][1]);
+
+                vec3 ndcCenter = clipCenter.xyz / clipCenter.w;
+
+                // We now need to solve for the eigen-values and eigen vectors of the 2D covariance matrix
+                // so that we can determine the 2D basis for the splat. This is done using the method described
+                // here: https://people.math.harvard.edu/~knill/teaching/math21b2004/exhibits/2dmatrices/index.html
+                // After calculating the eigen-values and eigen-vectors, we calculate the basis for rendering the splat
+                // by normalizing the eigen-vectors and then multiplying them by (sqrt(8) * eigen-value), which is
+                // equal to scaling them by sqrt(8) standard deviations.
+                //
+                // This is a different approach than in the original work at INRIA. In that work they compute the
+                // max extents of the projected splat in screen space to form a screen-space aligned bounding rectangle
+                // which forms the geometry that is actually rasterized. The dimensions of that bounding box are 3.0
+                // times the maximum eigen-value, or 3 standard deviations. They then use the inverse 2D covariance
+                // matrix (called 'conic') in the CUDA rendering thread to determine fragment opacity by calculating the
+                // full gaussian: exp(-0.5 * (X - mean) * conic * (X - mean)) * splat opacity
+                float a = cov2Dv.x;
+                float d = cov2Dv.z;
+                float b = cov2Dv.y;
+                float D = a * d - b * b;
+                float trace = a + d;
+                float traceOver2 = 0.5 * trace;
+                float term2 = sqrt(max(0.1f, traceOver2 * traceOver2 - D));
+                float eigenValue1 = traceOver2 + term2;
+                float eigenValue2 = traceOver2 - term2;
+
+                if (pointCloudModeEnabled == 1) {
+                    eigenValue1 = eigenValue2 = 0.2;
+                }
+
+                if (eigenValue2 <= 0.0) return;
+
+                vec2 eigenVector1 = normalize(vec2(b, eigenValue1 - a));
+                // since the eigen vectors are orthogonal, we derive the second one from the first
+                vec2 eigenVector2 = vec2(eigenVector1.y, -eigenVector1.x);
+
+                // We use sqrt(8) standard deviations instead of 3 to eliminate more of the splat with a very low opacity.
+                vec2 basisVector1 = eigenVector1 * splatScale * min(sqrt8 * sqrt(eigenValue1), ${parseInt(maxScreenSpaceSplatSize)}.0);
+                vec2 basisVector2 = eigenVector2 * splatScale * min(sqrt8 * sqrt(eigenValue2), ${parseInt(maxScreenSpaceSplatSize)}.0);
+
+                if (fadeInComplete == 0) {
+                    float opacityAdjust = 1.0;
+                    float centerDist = length(splatCenter - sceneCenter);
+                    float renderTime = max(currentTime - firstRenderTime, 0.0);
+
+                    float fadeDistance = 0.75;
+                    float distanceLoadFadeInFactor = step(visibleRegionFadeStartRadius, centerDist);
+                    distanceLoadFadeInFactor = (1.0 - distanceLoadFadeInFactor) +
+                                               (1.0 - clamp((centerDist - visibleRegionFadeStartRadius) / fadeDistance, 0.0, 1.0)) *
+                                               distanceLoadFadeInFactor;
+                    opacityAdjust *= distanceLoadFadeInFactor;
+                    vColor.a *= opacityAdjust;
+                }
+
+                vec2 ndcOffset = vec2(vPosition.x * basisVector1 + vPosition.y * basisVector2) *
+                                 basisViewport * 2.0 * inverseFocalAdjustment;
+
+                vec4 quadPos = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);
+                gl_Position = quadPos;
+
+                // Scale the position data we send to the fragment shader
+                vPosition *= sqrt8;
+            }`;
+
+            const fragmentShaderSource = `
+            precision highp float;
+            #include <common>
+ 
+            uniform vec3 debugColor;
+
+            varying vec4 vColor;
+            varying vec2 vUv;
+
+            varying vec2 vPosition;
+
+            void main () {
+                // Compute the positional squared distance from the center of the splat to the current fragment.
+                float A = dot(vPosition, vPosition);
+                // Since the positional data in vPosition has been scaled by sqrt(8), the squared result will be
+                // scaled by a factor of 8. If the squared result is larger than 8, it means it is outside the ellipse
+                // defined by the rectangle formed by vPosition. It also means it's farther
+                // away than sqrt(8) standard deviations from the mean.
+                if (A > 8.0) discard;
+                vec3 color = vColor.rgb;
+
+                // Since the rendered splat is scaled by sqrt(8), the inverse covariance matrix that is part of
+                // the gaussian formula becomes the identity matrix. We're then left with (X - mean) * (X - mean),
+                // and since 'mean' is zero, we have X * X, which is the same as A:
+                float opacity = exp(-0.5 * A) * vColor.a;
+
+                gl_FragColor = vec4(color.rgb, opacity);
+            }`;
+
+            const uniforms = {
+                'sceneCenter': {
+                    'type': 'v3',
+                    'value': new THREE__namespace.Vector3()
+                },
+                'fadeInComplete': {
+                    'type': 'i',
+                    'value': 0
+                },
+                'orthographicMode': {
+                    'type': 'i',
+                    'value': 0
+                },
+                'visibleRegionFadeStartRadius': {
+                    'type': 'f',
+                    'value': 0.0
+                },
+                'visibleRegionRadius': {
+                    'type': 'f',
+                    'value': 0.0
+                },
+                'currentTime': {
+                    'type': 'f',
+                    'value': 0.0
+                },
+                'firstRenderTime': {
+                    'type': 'f',
+                    'value': 0.0
+                },
+                'covariancesTexture': {
+                    'type': 't',
+                    'value': null
+                },
+                'centersColorsTexture': {
+                    'type': 't',
+                    'value': null
+                },
+                'sphericalHarmonicsTexture': {
+                    'type': 't',
+                    'value': null
+                },
+                'focal': {
+                    'type': 'v2',
+                    'value': new THREE__namespace.Vector2()
+                },
+                'orthoZoom': {
+                    'type': 'f',
+                    'value': 1.0
+                },
+                'inverseFocalAdjustment': {
+                    'type': 'f',
+                    'value': 1.0
+                },
+                'viewport': {
+                    'type': 'v2',
+                    'value': new THREE__namespace.Vector2()
+                },
+                'basisViewport': {
+                    'type': 'v2',
+                    'value': new THREE__namespace.Vector2()
+                },
+                'debugColor': {
+                    'type': 'v3',
+                    'value': new THREE__namespace.Color()
+                },
+                'covariancesTextureSize': {
+                    'type': 'v2',
+                    'value': new THREE__namespace.Vector2(1024, 1024)
+                },
+                'centersColorsTextureSize': {
+                    'type': 'v2',
+                    'value': new THREE__namespace.Vector2(1024, 1024)
+                },
+                'sphericalHarmonicsDegree': {
+                    'type': 'i',
+                    'value': maxSphericalHarmonicsDegree
+                },
+                'sphericalHarmonicsTextureSize': {
+                    'type': 'v2',
+                    'value': new THREE__namespace.Vector2(1024, 1024)
+                },
+                'sphericalHarmonics8BitMode': {
+                    'type': 'i',
+                    'value': 0
+                },
+                'splatScale': {
+                    'type': 'f',
+                    'value': splatScale
+                },
+                'pointCloudModeEnabled': {
+                    'type': 'i',
+                    'value': pointCloudModeEnabled ? 1 : 0
+                }
+            };
+
+            if (dynamicMode) {
+                uniforms['transformIndexesTexture'] = {
+                    'type': 't',
+                    'value': null
+                };
+                const transformMatrices = [];
+                for (let i = 0; i < Constants.MaxScenes; i++) {
+                    transformMatrices.push(new THREE__namespace.Matrix4());
+                }
+                uniforms['transforms'] = {
+                    'type': 'mat4',
+                    'value': transformMatrices
+                };
+                uniforms['transformIndexesTextureSize'] = {
+                    'type': 'v2',
+                    'value': new THREE__namespace.Vector2(1024, 1024)
+                };
+            }
+
+            const material = new THREE__namespace.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: vertexShaderSource,
+                fragmentShader: fragmentShaderSource,
+                transparent: true,
+                alphaTest: 1.0,
+                blending: THREE__namespace.NormalBlending,
+                depthTest: true,
+                depthWrite: false,
+                side: THREE__namespace.DoubleSide
+            });
+
+            return material;
+        }
+
+        /**
+         * Build the Three.js geometry that will be used to render the splats. The geometry is instanced and is made up of
+         * vertices for a single quad as well as an attribute buffer for the splat indexes.
+         * @param {number} maxSplatCount The maximum number of splats that the geometry will need to accomodate
+         * @return {THREE.InstancedBufferGeometry}
+         */
+        static buildGeomtery(maxSplatCount) {
+
+            const baseGeometry = new THREE__namespace.BufferGeometry();
+            baseGeometry.setIndex([0, 1, 2, 0, 2, 3]);
+
+            // Vertices for the instanced quad
+            const positionsArray = new Float32Array(4 * 3);
+            const positions = new THREE__namespace.BufferAttribute(positionsArray, 3);
+            baseGeometry.setAttribute('position', positions);
+            positions.setXYZ(0, -1.0, -1.0, 0.0);
+            positions.setXYZ(1, -1.0, 1.0, 0.0);
+            positions.setXYZ(2, 1.0, 1.0, 0.0);
+            positions.setXYZ(3, 1.0, -1.0, 0.0);
+            positions.needsUpdate = true;
+
+            const geometry = new THREE__namespace.InstancedBufferGeometry().copy(baseGeometry);
+
+            // Splat index buffer
+            const splatIndexArray = new Uint32Array(maxSplatCount);
+            const splatIndexes = new THREE__namespace.InstancedBufferAttribute(splatIndexArray, 1, false);
+            splatIndexes.setUsage(THREE__namespace.DynamicDrawUsage);
+            geometry.setAttribute('splatIndex', splatIndexes);
+
+            geometry.instanceCount = 0;
+
+            return geometry;
+        }
+
+        /**
          * Build a container for each scene managed by this splat mesh based on an instance of SplatBuffer, along with optional
          * transform data (position, scale, rotation) passed to the splat mesh during the build process.
          * @param {Array<THREE.Matrix4>} splatBuffers SplatBuffer instances containing splats for each scene
@@ -9578,7 +7280,7 @@
          * }
          * @return {Array<THREE.Matrix4>}
          */
-        static buildScenes(parentObject, splatBuffers, sceneOptions) {
+        static buildScenes(splatBuffers, sceneOptions) {
             const scenes = [];
             scenes.length = splatBuffers.length;
             for (let i = 0; i < splatBuffers.length; i++) {
@@ -9590,16 +7292,13 @@
                 const position = new THREE__namespace.Vector3().fromArray(positionArray);
                 const rotation = new THREE__namespace.Quaternion().fromArray(rotationArray);
                 const scale = new THREE__namespace.Vector3().fromArray(scaleArray);
-                const scene = SplatMesh.createScene(splatBuffer, position, rotation, scale,
-                                                    options.splatAlphaRemovalThreshold || 1, options.opacity, options.visible);
-                parentObject.add(scene);
-                scenes[i] = scene;
+                scenes[i] = SplatMesh.createScene(splatBuffer, position, rotation, scale, options.splatAlphaRemovalThreshold || 1);
             }
             return scenes;
         }
 
-        static createScene(splatBuffer, position, rotation, scale, minimumAlpha, opacity = 1.0, visible = true) {
-            return new SplatScene(splatBuffer, position, rotation, scale, minimumAlpha, opacity, visible);
+        static createScene(splatBuffer, position, rotation, scale, minimumAlpha) {
+            return new SplatScene(splatBuffer, position, rotation, scale, minimumAlpha);
         }
 
         /**
@@ -9712,14 +7411,14 @@
          * @return {object} Object containing info about the splats that are updated
          */
         build(splatBuffers, sceneOptions, keepSceneTransforms = true, finalBuild = false,
-              onSplatTreeIndexesUpload, onSplatTreeConstruction, preserveVisibleRegion = true) {
+              onSplatTreeIndexesUpload, onSplatTreeConstruction) {
 
             this.sceneOptions = sceneOptions;
             this.finalBuild = finalBuild;
 
             const maxSplatCount = SplatMesh.getTotalMaxSplatCountForSplatBuffers(splatBuffers);
 
-            const newScenes = SplatMesh.buildScenes(this, splatBuffers, sceneOptions);
+            const newScenes = SplatMesh.buildScenes(splatBuffers, sceneOptions);
             if (keepSceneTransforms) {
                 for (let i = 0; i < this.scenes.length && i < newScenes.length; i++) {
                     const newScene = newScenes[i];
@@ -9761,40 +7460,31 @@
 
            if (!isUpdateBuild) {
                 this.boundingBox = new THREE__namespace.Box3();
-                if (!preserveVisibleRegion) {
-                    this.maxSplatDistanceFromSceneCenter = 0;
-                    this.visibleRegionBufferRadius = 0;
-                    this.visibleRegionRadius = 0;
-                    this.visibleRegionFadeStartRadius = 0;
-                    this.firstRenderTime = -1;
-                }
+                this.maxSplatDistanceFromSceneCenter = 0;
+                this.visibleRegionBufferRadius = 0;
+                this.visibleRegionRadius = 0;
+                this.visibleRegionFadeStartRadius = 0;
+                this.firstRenderTime = -1;
                 this.lastBuildScenes = [];
                 this.lastBuildSplatCount = 0;
                 this.lastBuildMaxSplatCount = 0;
                 this.disposeMeshData();
-                this.geometry = SplatGeometry.build(maxSplatCount);
-                if (this.splatRenderMode === SplatRenderMode.ThreeD) {
-                    this.material = SplatMaterial3D.build(this.dynamicMode, this.enableOptionalEffects, this.antialiased,
-                                                          this.maxScreenSpaceSplatSize, this.splatScale, this.pointCloudModeEnabled,
-                                                          this.minSphericalHarmonicsDegree, this.kernel2DSize);
-                } else {
-                    this.material = SplatMaterial2D.build(this.dynamicMode, this.enableOptionalEffects,
-                                                          this.splatScale, this.pointCloudModeEnabled, this.minSphericalHarmonicsDegree);
-                }
-
+                this.geometry = SplatMesh.buildGeomtery(maxSplatCount);
+                this.material = SplatMesh.buildMaterial(this.dynamicMode, this.antialiased, this.maxScreenSpaceSplatSize,
+                                                        this.splatScale, this.pointCloudModeEnabled, this.minSphericalHarmonicsDegree);
                 const indexMaps = SplatMesh.buildSplatIndexMaps(splatBuffers);
                 this.globalSplatIndexToLocalSplatIndexMap = indexMaps.localSplatIndexMap;
                 this.globalSplatIndexToSceneIndexMap = indexMaps.sceneIndexMap;
             }
 
-            const splatBufferSplatCount = this.getSplatCount(true);
+            const splatCount = this.getSplatCount();
             if (this.enableDistancesComputationOnGPU) this.setupDistancesComputationTransformFeedback();
             const dataUpdateResults = this.refreshGPUDataFromSplatBuffers(isUpdateBuild);
 
             for (let i = 0; i < this.scenes.length; i++) {
                 this.lastBuildScenes[i] = this.scenes[i];
             }
-            this.lastBuildSplatCount = splatBufferSplatCount;
+            this.lastBuildSplatCount = splatCount;
             this.lastBuildMaxSplatCount = this.getMaxSplatCount();
             this.lastBuildSceneCount = this.scenes.length;
 
@@ -9803,7 +7493,6 @@
                                     onSplatTreeIndexesUpload, onSplatTreeConstruction)
                 .then(() => {
                     if (this.onSplatTreeReadyCallback) this.onSplatTreeReadyCallback(this.splatTree);
-                    this.onSplatTreeReadyCallback = null;
                 });
             }
 
@@ -9812,60 +7501,6 @@
             return dataUpdateResults;
         }
 
-        freeIntermediateSplatData() {
-
-            const deleteTextureData = (texture) => {
-                delete texture.source.data;
-                delete texture.image;
-                texture.onUpdate = null;
-            };
-
-            delete this.splatDataTextures.baseData.covariances;
-            delete this.splatDataTextures.baseData.centers;
-            delete this.splatDataTextures.baseData.colors;
-            delete this.splatDataTextures.baseData.sphericalHarmonics;
-
-            delete this.splatDataTextures.centerColors.data;
-            delete this.splatDataTextures.covariances.data;
-            if (this.splatDataTextures.sphericalHarmonics) {
-                delete this.splatDataTextures.sphericalHarmonics.data;
-            }
-            if (this.splatDataTextures.sceneIndexes) {
-                delete this.splatDataTextures.sceneIndexes.data;
-            }
-
-            this.splatDataTextures.centerColors.texture.needsUpdate = true;
-            this.splatDataTextures.centerColors.texture.onUpdate = () => {
-                deleteTextureData(this.splatDataTextures.centerColors.texture);
-            };
-
-            this.splatDataTextures.covariances.texture.needsUpdate = true;
-            this.splatDataTextures.covariances.texture.onUpdate = () => {
-                deleteTextureData(this.splatDataTextures.covariances.texture);
-            };
-
-            if (this.splatDataTextures.sphericalHarmonics) {
-                if (this.splatDataTextures.sphericalHarmonics.texture) {
-                    this.splatDataTextures.sphericalHarmonics.texture.needsUpdate = true;
-                    this.splatDataTextures.sphericalHarmonics.texture.onUpdate = () => {
-                        deleteTextureData(this.splatDataTextures.sphericalHarmonics.texture);
-                    };
-                } else {
-                    this.splatDataTextures.sphericalHarmonics.textures.forEach((texture) => {
-                        texture.needsUpdate = true;
-                        texture.onUpdate = () => {
-                            deleteTextureData(texture);
-                        };
-                    });
-                }
-            }
-            if (this.splatDataTextures.sceneIndexes) {
-                this.splatDataTextures.sceneIndexes.texture.needsUpdate = true;
-                this.splatDataTextures.sceneIndexes.texture.onUpdate = () => {
-                    deleteTextureData(this.splatDataTextures.sceneIndexes.texture);
-                };
-            }
-        }
         /**
          * Dispose all resources held by the splat mesh
          */
@@ -9887,11 +7522,11 @@
                 'fragmentShader': null,
                 'program': null,
                 'centersBuffer': null,
-                'sceneIndexesBuffer': null,
+                'transformIndexesBuffer': null,
                 'outDistancesBuffer': null,
                 'centersLoc': -1,
                 'modelViewProjLoc': -1,
-                'sceneIndexesLoc': -1,
+                'transformIndexesLoc': -1,
                 'transformsLocs': []
             };
             this.renderer = null;
@@ -9955,8 +7590,7 @@
             if (this.splatTree) {
                 this.splatTree.dispose();
                 this.splatTree = null;
-            }
-            if (this.baseSplatTree) {
+            } else if (this.baseSplatTree) {
                 this.baseSplatTree.dispose();
                 this.baseSplatTree = null;
             }
@@ -9994,7 +7628,7 @@
          * @return {object}
          */
         refreshGPUDataFromSplatBuffers(sinceLastBuildOnly) {
-            const splatCount = this.getSplatCount(true);
+            const splatCount = this.getSplatCount();
             this.refreshDataTexturesFromSplatBuffers(sinceLastBuildOnly);
             const updateStart = sinceLastBuildOnly ? this.lastBuildSplatCount : 0;
             const { centers, sceneIndexes } = this.getDataForDistancesComputation(updateStart, splatCount - 1);
@@ -10027,74 +7661,61 @@
          * @param {boolean} sinceLastBuildOnly Specify whether or not to only update for splats that have been added since the last build.
          */
         refreshDataTexturesFromSplatBuffers(sinceLastBuildOnly) {
-            const splatCount = this.getSplatCount(true);
-            const fromSplat = this.lastBuildSplatCount;
-            const toSplat = splatCount - 1;
-
             if (!sinceLastBuildOnly) {
                 this.setupDataTextures();
-                this.updateBaseDataFromSplatBuffers();
             } else {
-                this.updateBaseDataFromSplatBuffers(fromSplat, toSplat);
+                this.updateDataTextures();
             }
-
-            this.updateDataTexturesFromBaseData(fromSplat, toSplat);
             this.updateVisibleRegion(sinceLastBuildOnly);
         }
 
         setupDataTextures() {
             const maxSplatCount = this.getMaxSplatCount();
-            const splatCount = this.getSplatCount(true);
+            const splatCount = this.getSplatCount();
 
             this.disposeTextures();
 
-            const computeDataTextureSize = (elementsPerTexel, elementsPerSplat) => {
+            const computeDataTextureSize = (elementsPerTexel, elementsPerSplatl) => {
                 const texSize = new THREE__namespace.Vector2(4096, 1024);
-                while (texSize.x * texSize.y * elementsPerTexel < maxSplatCount * elementsPerSplat) texSize.y *= 2;
+                while (texSize.x * texSize.y * elementsPerTexel < maxSplatCount * elementsPerSplatl) texSize.y *= 2;
                 return texSize;
             };
 
-            const getCovariancesElementsPertexelStored = (compressionLevel) => {
-                return compressionLevel >= 1 ? COVARIANCES_ELEMENTS_PER_TEXEL_COMPRESSED_STORED : COVARIANCES_ELEMENTS_PER_TEXEL_STORED;
-            };
+            const covarianceCompressionLevel = this.getTargetCovarianceCompressionLevel();
+            const sphericalHarmonicsCompressionLevel = this.getTargetSphericalHarmonicsCompressionLevel();
 
-            const getCovariancesInitialTextureSpecs = (compressionLevel) => {
-                const elementsPerTexelStored = getCovariancesElementsPertexelStored(compressionLevel);
-                const texSize = computeDataTextureSize(elementsPerTexelStored, 6);
-                return {elementsPerTexelStored, texSize};
-            };
-
-            let covarianceCompressionLevel = this.getTargetCovarianceCompressionLevel();
-            const scaleRotationCompressionLevel = 0;
-            const shCompressionLevel = this.getTargetSphericalHarmonicsCompressionLevel();
-
-            let covariances;
-            let scales;
-            let rotations;
-            if (this.splatRenderMode === SplatRenderMode.ThreeD) {
-                const initialCovTexSpecs = getCovariancesInitialTextureSpecs(covarianceCompressionLevel);
-                if (initialCovTexSpecs.texSize.x * initialCovTexSpecs.texSize.y > MAX_TEXTURE_TEXELS && covarianceCompressionLevel === 0) {
-                    covarianceCompressionLevel = 1;
-                }
-                covariances = new Float32Array(maxSplatCount * COVARIANCES_ELEMENTS_PER_SPLAT);
-            } else {
-                scales = new Float32Array(maxSplatCount * 3);
-                rotations = new Float32Array(maxSplatCount * 4);
-            }
-
+            const covariances = new Float32Array(maxSplatCount * COVARIANCES_ELEMENTS_PER_SPLAT);
             const centers = new Float32Array(maxSplatCount * 3);
             const colors = new Uint8Array(maxSplatCount * 4);
 
             let SphericalHarmonicsArrayType = Float32Array;
-            if (shCompressionLevel === 1) SphericalHarmonicsArrayType = Uint16Array;
-            else if (shCompressionLevel === 2) SphericalHarmonicsArrayType = Uint8Array;
-            const shComponentCount = getSphericalHarmonicsComponentCountForDegree(this.minSphericalHarmonicsDegree);
-            const shData = this.minSphericalHarmonicsDegree ? new SphericalHarmonicsArrayType(maxSplatCount * shComponentCount) : undefined;
+            if (sphericalHarmonicsCompressionLevel === 1) SphericalHarmonicsArrayType = Uint16Array;
+            else if (sphericalHarmonicsCompressionLevel === 2) SphericalHarmonicsArrayType = Uint8Array;
+            const sphericalHarmonicsComponentCount = getSphericalHarmonicsComponentCountForDegree(this.minSphericalHarmonicsDegree);
+            let paddedSphericalHarmonicsComponentCount = sphericalHarmonicsComponentCount;
+            if (paddedSphericalHarmonicsComponentCount % 2 !== 0) paddedSphericalHarmonicsComponentCount++;
+            const sphericalHarmonics = this.minSphericalHarmonicsDegree ?
+                                       new SphericalHarmonicsArrayType(maxSplatCount * sphericalHarmonicsComponentCount) : undefined;
+
+            this.fillSplatDataArrays(covariances, centers, colors, sphericalHarmonics, undefined,
+                                     covarianceCompressionLevel, sphericalHarmonicsCompressionLevel);
+
+            // set up covariances data texture
+            const covTexSize = computeDataTextureSize(COVARIANCES_ELEMENTS_PER_TEXEL, 6);
+            let CovariancesDataType = covarianceCompressionLevel >= 1 ? Uint16Array : Float32Array;
+            let covariancesTextureType = covarianceCompressionLevel >= 1 ? THREE__namespace.HalfFloatType : THREE__namespace.FloatType;
+            const paddedCovariances = new CovariancesDataType(covTexSize.x * covTexSize.y * COVARIANCES_ELEMENTS_PER_TEXEL);
+            paddedCovariances.set(covariances);
+
+            const covTex = new THREE__namespace.DataTexture(paddedCovariances, covTexSize.x, covTexSize.y, THREE__namespace.RGBAFormat, covariancesTextureType);
+            covTex.needsUpdate = true;
+            this.material.uniforms.covariancesTexture.value = covTex;
+            this.material.uniforms.covariancesTextureSize.value.copy(covTexSize);
 
             // set up centers/colors data texture
             const centersColsTexSize = computeDataTextureSize(CENTER_COLORS_ELEMENTS_PER_TEXEL, 4);
             const paddedCentersCols = new Uint32Array(centersColsTexSize.x * centersColsTexSize.y * CENTER_COLORS_ELEMENTS_PER_TEXEL);
-            SplatMesh.updateCenterColorsPaddedData(0, splatCount - 1, centers, colors, paddedCentersCols);
+            SplatMesh.updateCenterColorsPaddedData(0, splatCount, centers, colors, paddedCentersCols);
 
             const centersColsTex = new THREE__namespace.DataTexture(paddedCentersCols, centersColsTexSize.x, centersColsTexSize.y,
                                                          THREE__namespace.RGBAIntegerFormat, THREE__namespace.UnsignedIntType);
@@ -10107,11 +7728,15 @@
             this.splatDataTextures = {
                 'baseData': {
                     'covariances': covariances,
-                    'scales': scales,
-                    'rotations': rotations,
                     'centers': centers,
                     'colors': colors,
-                    'sphericalHarmonics': shData
+                    'sphericalHarmonics': sphericalHarmonics
+                },
+                'covariances': {
+                    'data': paddedCovariances,
+                    'texture': covTex,
+                    'size': covTexSize,
+                    'compressionLevel': covarianceCompressionLevel
                 },
                 'centerColors': {
                     'data': paddedCentersCols,
@@ -10120,348 +7745,149 @@
                 }
             };
 
-            if (this.splatRenderMode === SplatRenderMode.ThreeD) {
-                // set up covariances data texture
-
-                const covTexSpecs = getCovariancesInitialTextureSpecs(covarianceCompressionLevel);
-                const covariancesElementsPerTexelStored = covTexSpecs.elementsPerTexelStored;
-                const covTexSize = covTexSpecs.texSize;
-
-                let CovariancesDataType = covarianceCompressionLevel >= 1 ? Uint32Array : Float32Array;
-                const covariancesElementsPerTexelAllocated = covarianceCompressionLevel >= 1 ?
-                                                             COVARIANCES_ELEMENTS_PER_TEXEL_COMPRESSED_ALLOCATED :
-                                                             COVARIANCES_ELEMENTS_PER_TEXEL_ALLOCATED;
-                const covariancesTextureData = new CovariancesDataType(covTexSize.x * covTexSize.y * covariancesElementsPerTexelAllocated);
-
-                if (covarianceCompressionLevel === 0) {
-                    covariancesTextureData.set(covariances);
-                } else {
-                    SplatMesh.updatePaddedCompressedCovariancesTextureData(covariances, covariancesTextureData, 0, 0, covariances.length);
-                }
-
-                let covTex;
-                if (covarianceCompressionLevel >= 1) {
-                    covTex = new THREE__namespace.DataTexture(covariancesTextureData, covTexSize.x, covTexSize.y,
-                                                   THREE__namespace.RGBAIntegerFormat, THREE__namespace.UnsignedIntType);
-                    covTex.internalFormat = 'RGBA32UI';
-                    this.material.uniforms.covariancesTextureHalfFloat.value = covTex;
-                } else {
-                    covTex = new THREE__namespace.DataTexture(covariancesTextureData, covTexSize.x, covTexSize.y, THREE__namespace.RGBAFormat, THREE__namespace.FloatType);
-                    this.material.uniforms.covariancesTexture.value = covTex;
-
-                    // For some reason a usampler2D needs to have a valid texture attached or WebGL complains
-                    const dummyTex = new THREE__namespace.DataTexture(new Uint32Array(32), 2, 2, THREE__namespace.RGBAIntegerFormat, THREE__namespace.UnsignedIntType);
-                    dummyTex.internalFormat = 'RGBA32UI';
-                    this.material.uniforms.covariancesTextureHalfFloat.value = dummyTex;
-                    dummyTex.needsUpdate = true;
-                }
-                covTex.needsUpdate = true;
-
-                this.material.uniforms.covariancesAreHalfFloat.value = (covarianceCompressionLevel >= 1) ? 1 : 0;
-                this.material.uniforms.covariancesTextureSize.value.copy(covTexSize);
-
-                this.splatDataTextures['covariances'] = {
-                    'data': covariancesTextureData,
-                    'texture': covTex,
-                    'size': covTexSize,
-                    'compressionLevel': covarianceCompressionLevel,
-                    'elementsPerTexelStored': covariancesElementsPerTexelStored,
-                    'elementsPerTexelAllocated': covariancesElementsPerTexelAllocated
-                };
-            } else {
-                // set up scale & rotations data texture
-                const elementsPerSplat = 6;
-                const scaleRotationsTexSize = computeDataTextureSize(SCALES_ROTATIONS_ELEMENTS_PER_TEXEL, elementsPerSplat);
-                let ScaleRotationsDataType = scaleRotationCompressionLevel >= 1 ? Uint16Array : Float32Array;
-                let scaleRotationsTextureType = scaleRotationCompressionLevel >= 1 ? THREE__namespace.HalfFloatType : THREE__namespace.FloatType;
-                const paddedScaleRotations = new ScaleRotationsDataType(scaleRotationsTexSize.x * scaleRotationsTexSize.y *
-                                                                        SCALES_ROTATIONS_ELEMENTS_PER_TEXEL);
-
-                SplatMesh.updateScaleRotationsPaddedData(0, splatCount - 1, scales, rotations, paddedScaleRotations);
-
-                const scaleRotationsTex = new THREE__namespace.DataTexture(paddedScaleRotations, scaleRotationsTexSize.x, scaleRotationsTexSize.y,
-                                                                THREE__namespace.RGBAFormat, scaleRotationsTextureType);
-                scaleRotationsTex.needsUpdate = true;
-                this.material.uniforms.scaleRotationsTexture.value = scaleRotationsTex;
-                this.material.uniforms.scaleRotationsTextureSize.value.copy(scaleRotationsTexSize);
-
-                this.splatDataTextures['scaleRotations'] = {
-                    'data': paddedScaleRotations,
-                    'texture': scaleRotationsTex,
-                    'size': scaleRotationsTexSize,
-                    'compressionLevel': scaleRotationCompressionLevel
-                };
-            }
-
-            if (shData) {
-                const shTextureType = shCompressionLevel === 2 ? THREE__namespace.UnsignedByteType : THREE__namespace.HalfFloatType;
-
-                let paddedSHComponentCount = shComponentCount;
-                if (paddedSHComponentCount % 2 !== 0) paddedSHComponentCount++;
-                const shElementsPerTexel = 4;
-                const texelFormat = shElementsPerTexel === 4 ? THREE__namespace.RGBAFormat : THREE__namespace.RGFormat;
-                let shTexSize = computeDataTextureSize(shElementsPerTexel, paddedSHComponentCount);
-
-                // Use one texture for all spherical harmonics data
-                if (shTexSize.x * shTexSize.y <= MAX_TEXTURE_TEXELS) {
-                    const paddedSHArraySize = shTexSize.x * shTexSize.y * shElementsPerTexel;
-                    const paddedSHArray = new SphericalHarmonicsArrayType(paddedSHArraySize);
-                    for (let c = 0; c < splatCount; c++) {
-                        const srcBase = shComponentCount * c;
-                        const destBase = paddedSHComponentCount * c;
-                        for (let i = 0; i < shComponentCount; i++) {
-                            paddedSHArray[destBase + i] = shData[srcBase + i];
-                        }
+            if (sphericalHarmonics) {
+                const sphericalHarmonicsElementsPerTexel = 4;
+                const sphericalHarmonicsTexSize = computeDataTextureSize(sphericalHarmonicsElementsPerTexel,
+                                                                         paddedSphericalHarmonicsComponentCount);
+                const paddedSHArraySize = sphericalHarmonicsTexSize.x * sphericalHarmonicsTexSize.y * sphericalHarmonicsElementsPerTexel;
+                const paddedSHArray = new SphericalHarmonicsArrayType(paddedSHArraySize);
+                for (let c = 0; c < splatCount; c++) {
+                    const srcBase = sphericalHarmonicsComponentCount * c;
+                    const destBase = paddedSphericalHarmonicsComponentCount * c;
+                    for (let i = 0; i < sphericalHarmonicsComponentCount; i++) {
+                        paddedSHArray[destBase + i] = sphericalHarmonics[srcBase + i];
                     }
-
-                    const shTexture = new THREE__namespace.DataTexture(paddedSHArray, shTexSize.x, shTexSize.y, texelFormat, shTextureType);
-                    shTexture.needsUpdate = true;
-                    this.material.uniforms.sphericalHarmonicsTexture.value = shTexture;
-                    this.splatDataTextures['sphericalHarmonics'] = {
-                        'componentCount': shComponentCount,
-                        'paddedComponentCount': paddedSHComponentCount,
-                        'data': paddedSHArray,
-                        'textureCount': 1,
-                        'texture': shTexture,
-                        'size': shTexSize,
-                        'compressionLevel': shCompressionLevel,
-                        'elementsPerTexel': shElementsPerTexel
-                    };
-                // Use three textures for spherical harmonics data, one per color channel
-                } else {
-                    const shComponentCountPerChannel = shComponentCount / 3;
-                    paddedSHComponentCount = shComponentCountPerChannel;
-                    if (paddedSHComponentCount % 2 !== 0) paddedSHComponentCount++;
-                    shTexSize = computeDataTextureSize(shElementsPerTexel, paddedSHComponentCount);
-
-                    const paddedSHArraySize = shTexSize.x * shTexSize.y * shElementsPerTexel;
-                    const textureUniforms = [this.material.uniforms.sphericalHarmonicsTextureR,
-                                             this.material.uniforms.sphericalHarmonicsTextureG,
-                                             this.material.uniforms.sphericalHarmonicsTextureB];
-                    const paddedSHArrays = [];
-                    const shTextures = [];
-                    for (let t = 0; t < 3; t++) {
-                        const paddedSHArray = new SphericalHarmonicsArrayType(paddedSHArraySize);
-                        paddedSHArrays.push(paddedSHArray);
-                        for (let c = 0; c < splatCount; c++) {
-                            const srcBase = shComponentCount * c;
-                            const destBase = paddedSHComponentCount * c;
-                            if (shComponentCountPerChannel >= 3) {
-                                for (let i = 0; i < 3; i++) paddedSHArray[destBase + i] = shData[srcBase + t * 3 + i];
-                                if (shComponentCountPerChannel >= 8) {
-                                    for (let i = 0; i < 5; i++) paddedSHArray[destBase + 3 + i] = shData[srcBase + 9 + t * 5 + i];
-                                }
-                            }
-                        }
-
-                        const shTexture = new THREE__namespace.DataTexture(paddedSHArray, shTexSize.x, shTexSize.y, texelFormat, shTextureType);
-                        shTextures.push(shTexture);
-                        shTexture.needsUpdate = true;
-                        textureUniforms[t].value = shTexture;
-                    }
-
-                    this.material.uniforms.sphericalHarmonicsMultiTextureMode.value = 1;
-                    this.splatDataTextures['sphericalHarmonics'] = {
-                        'componentCount': shComponentCount,
-                        'componentCountPerChannel': shComponentCountPerChannel,
-                        'paddedComponentCount': paddedSHComponentCount,
-                        'data': paddedSHArrays,
-                        'textureCount': 3,
-                        'textures': shTextures,
-                        'size': shTexSize,
-                        'compressionLevel': shCompressionLevel,
-                        'elementsPerTexel': shElementsPerTexel
-                    };
                 }
 
-                this.material.uniforms.sphericalHarmonicsTextureSize.value.copy(shTexSize);
-                this.material.uniforms.sphericalHarmonics8BitMode.value = shCompressionLevel === 2 ? 1 : 0;
-                for (let s = 0; s < this.scenes.length; s++) {
-                    const splatBuffer = this.scenes[s].splatBuffer;
-                    this.material.uniforms.sphericalHarmonics8BitCompressionRangeMin.value[s] =
-                        splatBuffer.minSphericalHarmonicsCoeff;
-                    this.material.uniforms.sphericalHarmonics8BitCompressionRangeMax.value[s] =
-                        splatBuffer.maxSphericalHarmonicsCoeff;
+                const textureType = sphericalHarmonicsCompressionLevel === 2 ? THREE__namespace.UnsignedByteType : THREE__namespace.HalfFloatType;
+                const sphericalHarmonicsTex = new THREE__namespace.DataTexture(paddedSHArray, sphericalHarmonicsTexSize.x,
+                                                                    sphericalHarmonicsTexSize.y, THREE__namespace.RGBAFormat, textureType);
+                sphericalHarmonicsTex.needsUpdate = true;
+                this.material.uniforms.sphericalHarmonicsTexture.value = sphericalHarmonicsTex;
+                this.material.uniforms.sphericalHarmonicsTextureSize.value.copy(sphericalHarmonicsTexSize);
+                if (sphericalHarmonicsCompressionLevel === 2) {
+                    this.material.uniforms.sphericalHarmonics8BitMode.value = 1;
                 }
                 this.material.uniformsNeedUpdate = true;
+
+                this.splatDataTextures['sphericalHarmonics'] = {
+                    'componentCount': sphericalHarmonicsComponentCount,
+                    'paddedComponentCount': paddedSphericalHarmonicsComponentCount,
+                    'data': paddedSHArray,
+                    'texture': sphericalHarmonicsTex,
+                    'size': sphericalHarmonicsTexSize,
+                    'compressionLevel': sphericalHarmonicsCompressionLevel
+                };
             }
 
-            const sceneIndexesTexSize = computeDataTextureSize(SCENE_INDEXES_ELEMENTS_PER_TEXEL, 4);
-            const paddedTransformIndexes = new Uint32Array(sceneIndexesTexSize.x *
-                                                           sceneIndexesTexSize.y * SCENE_INDEXES_ELEMENTS_PER_TEXEL);
-            for (let c = 0; c < splatCount; c++) paddedTransformIndexes[c] = this.globalSplatIndexToSceneIndexMap[c];
-            const sceneIndexesTexture = new THREE__namespace.DataTexture(paddedTransformIndexes, sceneIndexesTexSize.x, sceneIndexesTexSize.y,
-                                                              THREE__namespace.RedIntegerFormat, THREE__namespace.UnsignedIntType);
-            sceneIndexesTexture.internalFormat = 'R32UI';
-            sceneIndexesTexture.needsUpdate = true;
-            this.material.uniforms.sceneIndexesTexture.value = sceneIndexesTexture;
-            this.material.uniforms.sceneIndexesTextureSize.value.copy(sceneIndexesTexSize);
-            this.material.uniformsNeedUpdate = true;
-            this.splatDataTextures['sceneIndexes'] = {
-                'data': paddedTransformIndexes,
-                'texture': sceneIndexesTexture,
-                'size': sceneIndexesTexSize
-            };
-            this.material.uniforms.sceneCount.value = this.scenes.length;
+            if (this.dynamicMode) {
+                const transformIndexesTexSize = computeDataTextureSize(TRANSFORM_INDEXES_ELEMENTS_PER_TEXEL, 4);
+                const paddedTransformIndexes = new Uint32Array(transformIndexesTexSize.x *
+                                                               transformIndexesTexSize.y * TRANSFORM_INDEXES_ELEMENTS_PER_TEXEL);
+                for (let c = 0; c < splatCount; c++) paddedTransformIndexes[c] = this.globalSplatIndexToSceneIndexMap[c];
+                const transformIndexesTexture = new THREE__namespace.DataTexture(paddedTransformIndexes, transformIndexesTexSize.x,
+                                                                      transformIndexesTexSize.y, THREE__namespace.RedIntegerFormat,
+                                                                      THREE__namespace.UnsignedIntType);
+                transformIndexesTexture.internalFormat = 'R32UI';
+                transformIndexesTexture.needsUpdate = true;
+                this.material.uniforms.transformIndexesTexture.value = transformIndexesTexture;
+                this.material.uniforms.transformIndexesTextureSize.value.copy(transformIndexesTexSize);
+                this.material.uniformsNeedUpdate = true;
+                this.splatDataTextures['tansformIndexes'] = {
+                    'data': paddedTransformIndexes,
+                    'texture': transformIndexesTexture,
+                    'size': transformIndexesTexSize
+                };
+            }
         }
 
-        updateBaseDataFromSplatBuffers(fromSplat, toSplat) {
-            const covarancesTextureDesc = this.splatDataTextures['covariances'];
-            const covarianceCompressionLevel = covarancesTextureDesc ? covarancesTextureDesc.compressionLevel : undefined;
-            const scaleRotationsTextureDesc = this.splatDataTextures['scaleRotations'];
-            const scaleRotationCompressionLevel = scaleRotationsTextureDesc ? scaleRotationsTextureDesc.compressionLevel : undefined;
-            const shITextureDesc = this.splatDataTextures['sphericalHarmonics'];
-            const shCompressionLevel = shITextureDesc ? shITextureDesc.compressionLevel : 0;
+        updateDataTextures() {
+            const splatCount = this.getSplatCount();
+            const covarianceCompressionLevel = this.splatDataTextures['covariances'].compressionLevel;
 
-            this.fillSplatDataArrays(this.splatDataTextures.baseData.covariances, this.splatDataTextures.baseData.scales,
-                                     this.splatDataTextures.baseData.rotations, this.splatDataTextures.baseData.centers,
-                                     this.splatDataTextures.baseData.colors, this.splatDataTextures.baseData.sphericalHarmonics, undefined,
-                                     covarianceCompressionLevel, scaleRotationCompressionLevel, shCompressionLevel,
-                                     fromSplat, toSplat, fromSplat);
-        }
+            const sphericalHarmonicsTextureDesc = this.splatDataTextures['sphericalHarmonics'];
+            const sphericalHarmonicsCompressionLevel = sphericalHarmonicsTextureDesc ? sphericalHarmonicsTextureDesc.compressionLevel : 0;
 
-        updateDataTexturesFromBaseData(fromSplat, toSplat) {
-            const covarancesTextureDesc = this.splatDataTextures['covariances'];
-            const covarianceCompressionLevel = covarancesTextureDesc ? covarancesTextureDesc.compressionLevel : undefined;
-            const scaleRotationsTextureDesc = this.splatDataTextures['scaleRotations'];
-            const scaleRotationCompressionLevel = scaleRotationsTextureDesc ? scaleRotationsTextureDesc.compressionLevel : undefined;
-            const shTextureDesc = this.splatDataTextures['sphericalHarmonics'];
-            const shCompressionLevel = shTextureDesc ? shTextureDesc.compressionLevel : 0;
+            this.fillSplatDataArrays(this.splatDataTextures.baseData.covariances,
+                                     this.splatDataTextures.baseData.centers, this.splatDataTextures.baseData.colors,
+                                     this.splatDataTextures.baseData.sphericalHarmonics, undefined, covarianceCompressionLevel,
+                                     sphericalHarmonicsCompressionLevel, this.lastBuildSplatCount, splatCount - 1, this.lastBuildSplatCount);
 
-            // Update center & color data texture
+            const covariancesTextureDescriptor = this.splatDataTextures['covariances'];
+            const paddedCovariances = covariancesTextureDescriptor.data;
+            const covariancesTexture = covariancesTextureDescriptor.texture;
+            const covarancesStartSplat = this.lastBuildSplatCount * COVARIANCES_ELEMENTS_PER_SPLAT;
+            const covariancesEndSplat = splatCount * COVARIANCES_ELEMENTS_PER_SPLAT;
+            for (let i = covarancesStartSplat; i < covariancesEndSplat; i++) {
+                const covariance = this.splatDataTextures.baseData.covariances[i];
+                paddedCovariances[i] = covariance;
+            }
+            const covariancesTextureProps = this.renderer ? this.renderer.properties.get(covariancesTexture) : null;
+            if (!covariancesTextureProps || !covariancesTextureProps.__webglTexture) {
+                covariancesTexture.needsUpdate = true;
+            } else {
+                const covaranceBytesPerElement = covarianceCompressionLevel ? 2 : 4;
+                this.updateDataTexture(paddedCovariances, covariancesTextureDescriptor, covariancesTextureProps,
+                                       COVARIANCES_ELEMENTS_PER_TEXEL, COVARIANCES_ELEMENTS_PER_SPLAT, covaranceBytesPerElement,
+                                       this.lastBuildSplatCount, splatCount - 1);
+            }
+
             const centerColorsTextureDescriptor = this.splatDataTextures['centerColors'];
             const paddedCenterColors = centerColorsTextureDescriptor.data;
             const centerColorsTexture = centerColorsTextureDescriptor.texture;
-            SplatMesh.updateCenterColorsPaddedData(fromSplat, toSplat, this.splatDataTextures.baseData.centers,
+            SplatMesh.updateCenterColorsPaddedData(this.lastBuildSplatCount, splatCount, this.splatDataTextures.baseData.centers,
                                                    this.splatDataTextures.baseData.colors, paddedCenterColors);
             const centerColorsTextureProps = this.renderer ? this.renderer.properties.get(centerColorsTexture) : null;
             if (!centerColorsTextureProps || !centerColorsTextureProps.__webglTexture) {
                 centerColorsTexture.needsUpdate = true;
             } else {
-                this.updateDataTexture(paddedCenterColors, centerColorsTextureDescriptor.texture, centerColorsTextureDescriptor.size,
-                                       centerColorsTextureProps, CENTER_COLORS_ELEMENTS_PER_TEXEL, CENTER_COLORS_ELEMENTS_PER_SPLAT, 4,
-                                       fromSplat, toSplat);
+                this.updateDataTexture(paddedCenterColors, centerColorsTextureDescriptor, centerColorsTextureProps,
+                                       CENTER_COLORS_ELEMENTS_PER_TEXEL, CENTER_COLORS_ELEMENTS_PER_SPLAT, 4,
+                                       this.lastBuildSplatCount, splatCount - 1);
             }
 
-            // update covariance data texture
-            if (covarancesTextureDesc) {
-                const covariancesTexture = covarancesTextureDesc.texture;
-                const covarancesStartElement = fromSplat * COVARIANCES_ELEMENTS_PER_SPLAT;
-                const covariancesEndElement = toSplat * COVARIANCES_ELEMENTS_PER_SPLAT;
-
-                if (covarianceCompressionLevel === 0) {
-                    for (let i = covarancesStartElement; i <= covariancesEndElement; i++) {
-                        const covariance = this.splatDataTextures.baseData.covariances[i];
-                        covarancesTextureDesc.data[i] = covariance;
+            if (this.splatDataTextures.baseData.sphericalHarmonics) {
+                const sphericalHarmonicsComponentCount = sphericalHarmonicsTextureDesc.componentCount;
+                const paddedSphericalHarmonicsComponentCount = sphericalHarmonicsTextureDesc.paddedComponentCount;
+                const paddedSHArray = sphericalHarmonicsTextureDesc.data;
+                for (let c = this.lastBuildSplatCount; c < splatCount; c++) {
+                    const srcBase = sphericalHarmonicsComponentCount * c;
+                    const destBase = paddedSphericalHarmonicsComponentCount * c;
+                    for (let i = 0; i < sphericalHarmonicsComponentCount; i++) {
+                        paddedSHArray[destBase + i] = this.splatDataTextures.baseData.sphericalHarmonics[srcBase + i];
                     }
-                } else {
-                    SplatMesh.updatePaddedCompressedCovariancesTextureData(this.splatDataTextures.baseData.covariances,
-                                                                           covarancesTextureDesc.data,
-                                                                           fromSplat * covarancesTextureDesc.elementsPerTexelAllocated,
-                                                                           covarancesStartElement, covariancesEndElement);
                 }
 
-                const covariancesTextureProps = this.renderer ? this.renderer.properties.get(covariancesTexture) : null;
-                if (!covariancesTextureProps || !covariancesTextureProps.__webglTexture) {
-                    covariancesTexture.needsUpdate = true;
+                const sphericalHarmonicsTex = sphericalHarmonicsTextureDesc.texture;
+                const sphericalHarmonicsTextureProps = this.renderer ? this.renderer.properties.get(sphericalHarmonicsTex) : null;
+                if (!sphericalHarmonicsTextureProps || !sphericalHarmonicsTextureProps.__webglTexture) {
+                    sphericalHarmonicsTex.needsUpdate = true;
                 } else {
-                    if (covarianceCompressionLevel === 0) {
-                        this.updateDataTexture(covarancesTextureDesc.data, covarancesTextureDesc.texture, covarancesTextureDesc.size,
-                                               covariancesTextureProps, covarancesTextureDesc.elementsPerTexelStored,
-                                               COVARIANCES_ELEMENTS_PER_SPLAT, 4, fromSplat, toSplat);
-                    } else {
-                        this.updateDataTexture(covarancesTextureDesc.data, covarancesTextureDesc.texture, covarancesTextureDesc.size,
-                                               covariancesTextureProps, covarancesTextureDesc.elementsPerTexelAllocated,
-                                               covarancesTextureDesc.elementsPerTexelAllocated, 2, fromSplat, toSplat);
-                    }
+                    const sphericalHarmonicsElementsPerTexel = 4;
+                    let sphericalHarmonicsBytesPerElement = 4;
+                    if (sphericalHarmonicsCompressionLevel === 1) sphericalHarmonicsBytesPerElement = 2;
+                    else if (sphericalHarmonicsCompressionLevel === 2) sphericalHarmonicsBytesPerElement = 1;
+                    this.updateDataTexture(paddedSHArray, sphericalHarmonicsTextureDesc, sphericalHarmonicsTextureProps,
+                                           sphericalHarmonicsElementsPerTexel, paddedSphericalHarmonicsComponentCount,
+                                           sphericalHarmonicsBytesPerElement, this.lastBuildSplatCount, splatCount - 1);
                 }
             }
 
-            // update scale and rotation data texture
-            if (scaleRotationsTextureDesc) {
-                const paddedScaleRotations = scaleRotationsTextureDesc.data;
-                const scaleRotationsTexture = scaleRotationsTextureDesc.texture;
-                const elementsPerSplat = 6;
-                const bytesPerElement = scaleRotationCompressionLevel === 0 ? 4 : 2;
-
-                SplatMesh.updateScaleRotationsPaddedData(fromSplat, toSplat, this.splatDataTextures.baseData.scales,
-                                                         this.splatDataTextures.baseData.rotations, paddedScaleRotations);
-                const scaleRotationsTextureProps = this.renderer ? this.renderer.properties.get(scaleRotationsTexture) : null;
-                if (!scaleRotationsTextureProps || !scaleRotationsTextureProps.__webglTexture) {
-                    scaleRotationsTexture.needsUpdate = true;
-                } else {
-                    this.updateDataTexture(paddedScaleRotations, scaleRotationsTextureDesc.texture, scaleRotationsTextureDesc.size,
-                                           scaleRotationsTextureProps, SCALES_ROTATIONS_ELEMENTS_PER_TEXEL, elementsPerSplat, bytesPerElement,
-                                           fromSplat, toSplat);
+            if (this.dynamicMode) {
+                const transformIndexesTexDesc = this.splatDataTextures['tansformIndexes'];
+                const paddedTransformIndexes = transformIndexesTexDesc.data;
+                for (let c = this.lastBuildSplatCount; c < splatCount; c++) {
+                    paddedTransformIndexes[c] = this.globalSplatIndexToSceneIndexMap[c];
                 }
-            }
 
-            // update spherical harmonics data texture
-            const shData = this.splatDataTextures.baseData.sphericalHarmonics;
-            if (shData) {
-                let shBytesPerElement = 4;
-                if (shCompressionLevel === 1) shBytesPerElement = 2;
-                else if (shCompressionLevel === 2) shBytesPerElement = 1;
-
-                const updateTexture = (shTexture, shTextureSize, elementsPerTexel, paddedSHArray, paddedSHComponentCount) => {
-                    const shTextureProps = this.renderer ? this.renderer.properties.get(shTexture) : null;
-                    if (!shTextureProps || !shTextureProps.__webglTexture) {
-                        shTexture.needsUpdate = true;
-                    } else {
-                        this.updateDataTexture(paddedSHArray, shTexture, shTextureSize, shTextureProps, elementsPerTexel,
-                                               paddedSHComponentCount, shBytesPerElement, fromSplat, toSplat);
-                    }
-                };
-
-                const shComponentCount = shTextureDesc.componentCount;
-                const paddedSHComponentCount = shTextureDesc.paddedComponentCount;
-
-                // Update for the case of a single texture for all spherical harmonics data
-                if (shTextureDesc.textureCount === 1) {
-                    const paddedSHArray = shTextureDesc.data;
-                    for (let c = fromSplat; c <= toSplat; c++) {
-                        const srcBase = shComponentCount * c;
-                        const destBase = paddedSHComponentCount * c;
-                        for (let i = 0; i < shComponentCount; i++) {
-                            paddedSHArray[destBase + i] = shData[srcBase + i];
-                        }
-                    }
-                    updateTexture(shTextureDesc.texture, shTextureDesc.size,
-                                  shTextureDesc.elementsPerTexel, paddedSHArray, paddedSHComponentCount);
-                // Update for the case of spherical harmonics data split among three textures, one for each color channel
+                const transformIndexesTexture = transformIndexesTexDesc.texture;
+                const transformIndexesTextureProps = this.renderer ? this.renderer.properties.get(transformIndexesTexture) : null;
+                if (!transformIndexesTextureProps || !transformIndexesTextureProps.__webglTexture) {
+                    transformIndexesTexture.needsUpdate = true;
                 } else {
-                    const shComponentCountPerChannel = shTextureDesc.componentCountPerChannel;
-                    for (let t = 0; t < 3; t++) {
-                        const paddedSHArray = shTextureDesc.data[t];
-                        for (let c = fromSplat; c <= toSplat; c++) {
-                            const srcBase = shComponentCount * c;
-                            const destBase = paddedSHComponentCount * c;
-                            if (shComponentCountPerChannel >= 3) {
-                                for (let i = 0; i < 3; i++) paddedSHArray[destBase + i] = shData[srcBase + t * 3 + i];
-                                if (shComponentCountPerChannel >= 8) {
-                                    for (let i = 0; i < 5; i++) paddedSHArray[destBase + 3 + i] = shData[srcBase + 9 + t * 5 + i];
-                                }
-                            }
-                        }
-                        updateTexture(shTextureDesc.textures[t], shTextureDesc.size,
-                                      shTextureDesc.elementsPerTexel, paddedSHArray, paddedSHComponentCount);
-                    }
+                    this.updateDataTexture(paddedTransformIndexes, transformIndexesTexDesc, transformIndexesTextureProps, 1, 1, 1,
+                                           this.lastBuildSplatCount, splatCount - 1);
                 }
-            }
-
-            // update scene index & transform data
-            const sceneIndexesTexDesc = this.splatDataTextures['sceneIndexes'];
-            const paddedSceneIndexes = sceneIndexesTexDesc.data;
-            for (let c = this.lastBuildSplatCount; c <= toSplat; c++) {
-                paddedSceneIndexes[c] = this.globalSplatIndexToSceneIndexMap[c];
-            }
-            const sceneIndexesTexture = sceneIndexesTexDesc.texture;
-            const sceneIndexesTextureProps = this.renderer ? this.renderer.properties.get(sceneIndexesTexture) : null;
-            if (!sceneIndexesTextureProps || !sceneIndexesTextureProps.__webglTexture) {
-                sceneIndexesTexture.needsUpdate = true;
-            } else {
-                this.updateDataTexture(paddedSceneIndexes, sceneIndexesTexDesc.texture, sceneIndexesTexDesc.size,
-                                       sceneIndexesTextureProps, 1, 1, 1, this.lastBuildSplatCount, toSplat);
             }
         }
 
@@ -10516,40 +7942,26 @@
             };
         }
 
-        updateDataTexture(paddedData, texture, textureSize, textureProps, elementsPerTexel, elementsPerSplat, bytesPerElement, from, to) {
+        updateDataTexture(paddedData, textureDesc, textureProps, elementsPerTexel, elementsPerSplat, bytesPerElement, from, to) {
             const gl = this.renderer.getContext();
-            const updateRegion = SplatMesh.computeTextureUpdateRegion(from, to, textureSize.x, elementsPerTexel, elementsPerSplat);
+            const updateRegion = SplatMesh.computeTextureUpdateRegion(from, to, textureDesc.size.x, elementsPerTexel, elementsPerSplat);
             const updateElementCount = updateRegion.dataEnd - updateRegion.dataStart;
             const updateDataView = new paddedData.constructor(paddedData.buffer,
                                                               updateRegion.dataStart * bytesPerElement, updateElementCount);
             const updateHeight = updateRegion.endRow - updateRegion.startRow + 1;
-            const glType = this.webGLUtils.convert(texture.type);
-            const glFormat = this.webGLUtils.convert(texture.format, texture.colorSpace);
+            const dataTexture = textureDesc.texture;
+            const glType = this.webGLUtils.convert(dataTexture.type);
+            const glFormat = this.webGLUtils.convert(dataTexture.format, dataTexture.colorSpace);
             const currentTexture = gl.getParameter(gl.TEXTURE_BINDING_2D);
             gl.bindTexture(gl.TEXTURE_2D, textureProps.__webglTexture);
             gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, updateRegion.startRow,
-                             textureSize.x, updateHeight, glFormat, glType, updateDataView);
+                             textureDesc.size.x, updateHeight, glFormat, glType, updateDataView);
             gl.bindTexture(gl.TEXTURE_2D, currentTexture);
         }
 
-        static updatePaddedCompressedCovariancesTextureData(sourceData, textureData, textureDataStartIndex, fromElement, toElement) {
-            let textureDataView = new DataView(textureData.buffer);
-            let textureDataIndex = textureDataStartIndex;
-            let sequentialCount = 0;
-            for (let i = fromElement; i <= toElement; i+=2) {
-                textureDataView.setUint16(textureDataIndex * 2, sourceData[i], true);
-                textureDataView.setUint16(textureDataIndex * 2 + 2, sourceData[i + 1], true);
-                textureDataIndex += 2;
-                sequentialCount++;
-                if (sequentialCount >= 3) {
-                    textureDataIndex += 2;
-                    sequentialCount = 0;
-                }
-            }
-        }
 
-        static updateCenterColorsPaddedData(from, to, centers, colors, paddedCenterColors) {
-            for (let c = from; c <= to; c++) {
+        static updateCenterColorsPaddedData(to, from, centers, colors, paddedCenterColors) {
+            for (let c = to; c < from; c++) {
                 const colorsBase = c * 4;
                 const centersBase = c * 3;
                 const centerColorsBase = c * 4;
@@ -10560,25 +7972,8 @@
             }
         }
 
-        static updateScaleRotationsPaddedData(from, to, scales, rotations, paddedScaleRotations) {
-            const combinedSize = 6;
-            for (let c = from; c <= to; c++) {
-                const scaleBase = c * 3;
-                const rotationBase = c * 4;
-                const scaleRotationsBase = c * combinedSize;
-
-                paddedScaleRotations[scaleRotationsBase] = scales[scaleBase];
-                paddedScaleRotations[scaleRotationsBase + 1] = scales[scaleBase + 1];
-                paddedScaleRotations[scaleRotationsBase + 2] = scales[scaleBase + 2];
-
-                paddedScaleRotations[scaleRotationsBase + 3] = rotations[rotationBase];
-                paddedScaleRotations[scaleRotationsBase + 4] = rotations[rotationBase + 1];
-                paddedScaleRotations[scaleRotationsBase + 5] = rotations[rotationBase + 2];
-            }
-        }
-
         updateVisibleRegion(sinceLastBuildOnly) {
-            const splatCount = this.getSplatCount(true);
+            const splatCount = this.getSplatCount();
             const tempCenter = new THREE__namespace.Vector3();
             if (!sinceLastBuildOnly) {
                 const avgCenter = new THREE__namespace.Vector3();
@@ -10593,7 +7988,7 @@
 
             const startSplatFormMaxDistanceCalc = sinceLastBuildOnly ? this.lastBuildSplatCount : 0;
             for (let i = startSplatFormMaxDistanceCalc; i < splatCount; i++) {
-                this.getSplatCenter(i, tempCenter, true);
+                this.getSplatCenter(i, tempCenter, false);
                 const distFromCSceneCenter = tempCenter.sub(this.calculatedSceneCenter).length();
                 if (distFromCSceneCenter > this.maxSplatDistanceFromSceneCenter) this.maxSplatDistanceFromSceneCenter = distFromCSceneCenter;
             }
@@ -10607,8 +8002,8 @@
         }
 
         updateVisibleRegionFadeDistance(sceneRevealMode = SceneRevealMode.Default) {
-            const fastFadeRate = SCENE_FADEIN_RATE_FAST * this.sceneFadeInRateMultiplier;
-            const gradualFadeRate = SCENE_FADEIN_RATE_GRADUAL * this.sceneFadeInRateMultiplier;
+            const fastFadeRate = SCENE_FADEIN_RATE_FAST;
+            const gradualFadeRate = SCENE_FADEIN_RATE_GRADUAL;
             const defaultFadeInRate = this.finalBuild ? fastFadeRate : gradualFadeRate;
             const fadeInRate = sceneRevealMode === SceneRevealMode.Default ? defaultFadeInRate : gradualFadeRate;
             this.visibleRegionFadeStartRadius = (this.visibleRegionRadius - this.visibleRegionFadeStartRadius) *
@@ -10639,7 +8034,6 @@
             geometry.attributes.splatIndex.needsUpdate = true;
             if (renderSplatCount > 0 && this.firstRenderTime === -1) this.firstRenderTime = performance.now();
             geometry.instanceCount = renderSplatCount;
-            geometry.setDrawRange(0, renderSplatCount);
         }
 
         /**
@@ -10649,7 +8043,7 @@
         updateTransforms() {
             for (let i = 0; i < this.scenes.length; i++) {
                 const scene = this.getScene(i);
-                scene.updateTransform(this.dynamicMode);
+                scene.updateTransform();
             }
         }
 
@@ -10672,13 +8066,6 @@
                     if (this.dynamicMode) {
                         for (let i = 0; i < this.scenes.length; i++) {
                             this.material.uniforms.transforms.value[i].copy(this.getScene(i).transform);
-                        }
-                    }
-                    if (this.enableOptionalEffects) {
-                        for (let i = 0; i < this.scenes.length; i++) {
-                            this.material.uniforms.sceneOpacity.value[i] = clamp(this.getScene(i).opacity, 0.0, 1.0);
-                            this.material.uniforms.sceneVisibility.value[i] = this.getScene(i).visible ? 1 : 0;
-                            this.material.uniformsNeedUpdate = true;
                         }
                     }
                     this.material.uniformsNeedUpdate = true;
@@ -10711,9 +8098,8 @@
             return this.splatDataTextures;
         }
 
-        getSplatCount(includeSinceLastBuild = false) {
-            if (!includeSinceLastBuild) return this.lastBuildSplatCount;
-            else return SplatMesh.getTotalSplatCountForScenes(this.scenes);
+        getSplatCount() {
+            return SplatMesh.getTotalSplatCountForScenes(this.scenes);
         }
 
         static getTotalSplatCountForScenes(scenes) {
@@ -10863,10 +8249,10 @@
                 flat out int distance;`;
                     if (this.dynamicMode) {
                         vsSource += `
-                        in uint sceneIndex;
+                        in uint transformIndex;
                         uniform ivec4 transforms[${Constants.MaxScenes}];
                         void main(void) {
-                            ivec4 transform = transforms[sceneIndex];
+                            ivec4 transform = transforms[transformIndex];
                             distance = center.x * transform.x + center.y * transform.y + center.z * transform.z + transform.w * center.w;
                         }
                     `;
@@ -10885,10 +8271,10 @@
                 flat out float distance;`;
                     if (this.dynamicMode) {
                         vsSource += `
-                        in uint sceneIndex;
+                        in uint transformIndex;
                         uniform mat4 transforms[${Constants.MaxScenes}];
                         void main(void) {
-                            vec4 transformedCenter = transforms[sceneIndex] * vec4(center.xyz, 1.0);
+                            vec4 transformedCenter = transforms[transformIndex] * vec4(center.xyz, 1.0);
                             distance = transformedCenter.z;
                         }
                     `;
@@ -10951,8 +8337,8 @@
                 this.distancesTransformFeedback.centersLoc =
                     gl.getAttribLocation(this.distancesTransformFeedback.program, 'center');
                 if (this.dynamicMode) {
-                    this.distancesTransformFeedback.sceneIndexesLoc =
-                        gl.getAttribLocation(this.distancesTransformFeedback.program, 'sceneIndex');
+                    this.distancesTransformFeedback.transformIndexesLoc =
+                        gl.getAttribLocation(this.distancesTransformFeedback.program, 'transformIndex');
                     for (let i = 0; i < this.scenes.length; i++) {
                         this.distancesTransformFeedback.transformsLocs[i] =
                             gl.getUniformLocation(this.distancesTransformFeedback.program, `transforms[${i}]`);
@@ -10973,10 +8359,10 @@
                     }
 
                     if (this.dynamicMode) {
-                        this.distancesTransformFeedback.sceneIndexesBuffer = gl.createBuffer();
-                        gl.bindBuffer(gl.ARRAY_BUFFER, this.distancesTransformFeedback.sceneIndexesBuffer);
-                        gl.enableVertexAttribArray(this.distancesTransformFeedback.sceneIndexesLoc);
-                        gl.vertexAttribIPointer(this.distancesTransformFeedback.sceneIndexesLoc, 1, gl.UNSIGNED_INT, 0, 0);
+                        this.distancesTransformFeedback.transformIndexesBuffer = gl.createBuffer();
+                        gl.bindBuffer(gl.ARRAY_BUFFER, this.distancesTransformFeedback.transformIndexesBuffer);
+                        gl.enableVertexAttribArray(this.distancesTransformFeedback.transformIndexesLoc);
+                        gl.vertexAttribIPointer(this.distancesTransformFeedback.transformIndexesLoc, 1, gl.UNSIGNED_INT, 0, 0);
                     }
                 }
 
@@ -11038,10 +8424,10 @@
         /**
          * Refresh GPU buffers used for pre-computing splat distances with centers data from the scenes for this mesh.
          * @param {boolean} isUpdate Specify whether or not to update the GPU buffer or to initialize & fill
-         * @param {Array<number>} sceneIndexes The splat scene indexes
+         * @param {Array<number>} transformIndexes The splat transform indexes
          * @param {number} offsetSplats Offset in the GPU buffer at which to start updating data, specified in splats
          */
-        updateGPUTransformIndexesBufferForDistancesComputation(isUpdate, sceneIndexes, offsetSplats) {
+        updateGPUTransformIndexesBufferForDistancesComputation(isUpdate, transformIndexes, offsetSplats) {
 
             if (!this.renderer || !this.dynamicMode) return;
 
@@ -11052,13 +8438,13 @@
 
             const subBufferOffset = offsetSplats * 4;
 
-            gl.bindBuffer(gl.ARRAY_BUFFER, this.distancesTransformFeedback.sceneIndexesBuffer);
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.distancesTransformFeedback.transformIndexesBuffer);
 
             if (isUpdate) {
-                gl.bufferSubData(gl.ARRAY_BUFFER, subBufferOffset, sceneIndexes);
+                gl.bufferSubData(gl.ARRAY_BUFFER, subBufferOffset, transformIndexes);
             } else {
                 const maxArray = new Uint32Array(this.getMaxSplatCount() * 4);
-                maxArray.set(sceneIndexes);
+                maxArray.set(transformIndexes);
                 gl.bufferData(gl.ARRAY_BUFFER, maxArray, gl.STATIC_DRAW);
             }
             gl.bindBuffer(gl.ARRAY_BUFFER, null);
@@ -11159,9 +8545,9 @@
                 }
 
                 if (this.dynamicMode) {
-                    gl.bindBuffer(gl.ARRAY_BUFFER, this.distancesTransformFeedback.sceneIndexesBuffer);
-                    gl.enableVertexAttribArray(this.distancesTransformFeedback.sceneIndexesLoc);
-                    gl.vertexAttribIPointer(this.distancesTransformFeedback.sceneIndexesLoc, 1, gl.UNSIGNED_INT, 0, 0);
+                    gl.bindBuffer(gl.ARRAY_BUFFER, this.distancesTransformFeedback.transformIndexesBuffer);
+                    gl.enableVertexAttribArray(this.distancesTransformFeedback.transformIndexesLoc);
+                    gl.vertexAttribIPointer(this.distancesTransformFeedback.transformIndexesLoc, 1, gl.UNSIGNED_INT, 0, 0);
                 }
 
                 gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, this.distancesTransformFeedback.id);
@@ -11244,8 +8630,6 @@
         /**
          * Fill arrays with splat data and apply transforms if appropriate. Each array is optional.
          * @param {Float32Array} covariances Target storage for splat covariances
-         * @param {Float32Array} scales Target storage for splat scales
-         * @param {Float32Array} rotations Target storage for splat rotations
          * @param {Float32Array} centers Target storage for splat centers
          * @param {Uint8Array} colors Target storage for splat colors
          * @param {Float32Array} sphericalHarmonics Target storage for spherical harmonics
@@ -11258,46 +8642,20 @@
          * @param {number} srcEnd The end location from which to pull source data
          * @param {number} destStart The start location from which to write data
          */
-        fillSplatDataArrays(covariances, scales, rotations, centers, colors, sphericalHarmonics, applySceneTransform,
-                            covarianceCompressionLevel = 0, scaleRotationCompressionLevel = 0, sphericalHarmonicsCompressionLevel = 1,
-                            srcStart, srcEnd, destStart = 0, sceneIndex) {
-            const scaleOverride = new THREE__namespace.Vector3();
-            scaleOverride.x = undefined;
-            scaleOverride.y = undefined;
-            if (this.splatRenderMode === SplatRenderMode.ThreeD) {
-                scaleOverride.z = undefined;
-            } else {
-                scaleOverride.z = 1;
-            }
-            const tempTransform = new THREE__namespace.Matrix4();
+        fillSplatDataArrays(covariances, centers, colors, sphericalHarmonics, applySceneTransform,
+                            covarianceCompressionLevel = 0, sphericalHarmonicsCompressionLevel = 1, srcStart, srcEnd, destStart = 0) {
 
-            let startSceneIndex = 0;
-            let endSceneIndex = this.scenes.length - 1;
-            if (sceneIndex !== undefined && sceneIndex !== null && sceneIndex >= 0 && sceneIndex <= this.scenes.length) {
-                startSceneIndex = sceneIndex;
-                endSceneIndex = sceneIndex;
-            }
-            for (let i = startSceneIndex; i <= endSceneIndex; i++) {
+            for (let i = 0; i < this.scenes.length; i++) {
                 if (applySceneTransform === undefined || applySceneTransform === null) {
                     applySceneTransform = this.dynamicMode ? false : true;
                 }
 
                 const scene = this.getScene(i);
                 const splatBuffer = scene.splatBuffer;
-                let sceneTransform;
-                if (applySceneTransform) {
-                    this.getSceneTransform(i, tempTransform);
-                    sceneTransform = tempTransform;
-                }
+                const sceneTransform = applySceneTransform ? scene.transform : null;
                 if (covariances) {
-                    splatBuffer.fillSplatCovarianceArray(covariances, sceneTransform, srcStart, srcEnd, destStart, covarianceCompressionLevel);
-                }
-                if (scales || rotations) {
-                    if (!scales || !rotations) {
-                        throw new Error('SplatMesh::fillSplatDataArrays() -> "scales" and "rotations" must both be valid.');
-                    }
-                    splatBuffer.fillSplatScaleRotationArray(scales, rotations, sceneTransform,
-                                                            srcStart, srcEnd, destStart, scaleRotationCompressionLevel, scaleOverride);
+                    splatBuffer.fillSplatCovarianceArray(covariances, sceneTransform,
+                                                         srcStart, srcEnd, destStart, covarianceCompressionLevel);
                 }
                 if (centers) splatBuffer.fillSplatCenterArray(centers, sceneTransform, srcStart, srcEnd, destStart);
                 if (colors) splatBuffer.fillSplatColorArray(colors, scene.minimumAlpha, srcStart, srcEnd, destStart);
@@ -11320,7 +8678,7 @@
         getIntegerCenters(start, end, padFour = false) {
             const splatCount = end - start + 1;
             const floatCenters = new Float32Array(splatCount * 3);
-            this.fillSplatDataArrays(null, null, null, floatCenters, null, null, undefined, undefined, undefined, undefined, start);
+            this.fillSplatDataArrays(null, floatCenters, null, null, undefined, undefined, undefined, start);
             let intCenters;
             let componentCount = padFour ? 4 : 3;
             intCenters = new Int32Array(splatCount * componentCount);
@@ -11343,7 +8701,7 @@
         getFloatCenters(start, end, padFour = false) {
             const splatCount = end - start + 1;
             const floatCenters = new Float32Array(splatCount * 3);
-            this.fillSplatDataArrays(null, null, null, floatCenters, null, null, undefined, undefined, undefined, undefined, start);
+            this.fillSplatDataArrays(null, floatCenters, null, null, undefined, undefined, undefined, start);
             if (!padFour) return floatCenters;
             let paddedFloatCenters = new Float32Array(splatCount * 4);
             for (let i = 0; i < splatCount; i++) {
@@ -11389,16 +8747,10 @@
         getSplatScaleAndRotation = function() {
 
             const paramsObj = {};
-            const scaleOverride = new THREE__namespace.Vector3();
 
             return function(globalIndex, outScale, outRotation, applySceneTransform) {
                 this.getLocalSplatParameters(globalIndex, paramsObj, applySceneTransform);
-                scaleOverride.x = undefined;
-                scaleOverride.y = undefined;
-                scaleOverride.z = undefined;
-                if (this.splatRenderMode === SplatRenderMode.TwoD) scaleOverride.z = 0;
-                paramsObj.splatBuffer.getSplatScaleAndRotation(paramsObj.localIndex, outScale, outRotation,
-                                                               paramsObj.sceneTransform, scaleOverride);
+                paramsObj.splatBuffer.getSplatScaleAndRotation(paramsObj.localIndex, outScale, outRotation, paramsObj.sceneTransform);
             };
 
         }();
@@ -11426,7 +8778,7 @@
          */
         getSceneTransform(sceneIndex, outTransform) {
             const scene = this.getScene(sceneIndex);
-            scene.updateTransform(this.dynamicMode);
+            scene.updateTransform();
             outTransform.copy(scene.transform);
         }
 
@@ -11440,10 +8792,6 @@
                 throw new Error('SplatMesh::getScene() -> Invalid scene index.');
             }
             return this.scenes[sceneIndex];
-        }
-
-        getSceneCount() {
-            return this.scenes.length;
         }
 
         getSplatBufferForSplat(globalIndex) {
@@ -11470,46 +8818,9 @@
             }
             return intMatrixArray;
         }
-
-        computeBoundingBox(applySceneTransforms = false, sceneIndex) {
-            let splatCount = this.getSplatCount();
-            if (sceneIndex !== undefined && sceneIndex !== null) {
-                if (sceneIndex < 0 || sceneIndex >= this.scenes.length) {
-                    throw new Error('SplatMesh::computeBoundingBox() -> Invalid scene index.');
-                }
-                splatCount = this.scenes[sceneIndex].splatBuffer.getSplatCount();
-            }
-
-            const floatCenters = new Float32Array(splatCount * 3);
-            this.fillSplatDataArrays(null, null, null, floatCenters, null, null, applySceneTransforms,
-                                     undefined, undefined, undefined, undefined, sceneIndex);
-
-            const min = new THREE__namespace.Vector3();
-            const max = new THREE__namespace.Vector3();
-            for (let i = 0; i < splatCount; i++) {
-                const offset = i * 3;
-                const x = floatCenters[offset];
-                const y = floatCenters[offset + 1];
-                const z = floatCenters[offset + 2];
-                if (i === 0 || x < min.x) min.x = x;
-                if (i === 0 || y < min.y) min.y = y;
-                if (i === 0 || z < min.z) min.z = z;
-                if (i === 0 || x > max.x) max.x = x;
-                if (i === 0 || y > max.y) max.y = y;
-                if (i === 0 || z > max.z) max.z = z;
-            }
-
-            return new THREE__namespace.Box3(min, max);
-        }
     }
 
-    var SorterWasm = "AGFzbQEAAAAADwhkeWxpbmsuMAEEAAAAAAEbA2AAAGAQf39/f39/f39/f39/f39/fwBgAAF/AhIBA2VudgZtZW1vcnkCAwCAgAQDBAMAAQIHVAQRX193YXNtX2NhbGxfY3RvcnMAABhfX3dhc21fYXBwbHlfZGF0YV9yZWxvY3MAAAtzb3J0SW5kZXhlcwABE2Vtc2NyaXB0ZW5fdGxzX2luaXQAAgqWEAMDAAELihAEAXwDewN/A30gCyAKayEMAkACQCAOBEAgDQRAQfj///8HIQpBiICAgHghDSALIAxNDQMgDCEBA0AgAyABQQJ0IgVqIAIgACAFaigCAEECdGooAgAiBTYCACAFIAogBSAKSBshCiAFIA0gBSANShshDSABQQFqIgEgC0cNAAsMAwsgDwRAIAsgDE0NAkF/IQ9B+P///wchCkGIgICAeCENIAwhAgNAIA8gByAAIAJBAnQiFWooAgAiFkECdGooAgAiFEcEQAJ/IAX9CQI4IAggFEEGdGoiDv0JAgwgDioCHP0gASAOKgIs/SACIA4qAjz9IAP95gEgBf0JAiggDv0JAgggDioCGP0gASAOKgIo/SACIA4qAjj9IAP95gEgBf0JAgggDv0JAgAgDioCEP0gASAOKgIg/SACIA4qAjD9IAP95gEgBf0JAhggDv0JAgQgDioCFP0gASAOKgIk/SACIA4qAjT9IAP95gH95AH95AH95AEiEf1f/QwAAAAAAECPQAAAAAAAQI9AIhL98gEiE/0hASIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAshDgJ/IBP9IQAiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgL/REgDv0cAQJ/IBEgEf0NCAkKCwwNDg8AAAAAAAAAAP1fIBL98gEiEf0hACIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAv9HAICfyAR/SEBIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4C/0cAyESIBQhDwsgAyAVaiABIBZBBHRq/QAAACAS/bUBIhH9GwAgEf0bAWogEf0bAmogEf0bA2oiDjYCACAOIAogCiAOShshCiAOIA0gDSAOSBshDSACQQFqIgIgC0cNAAsMAwsCfyAFKgIIu/0UIAUqAhi7/SIB/QwAAAAAAECPQAAAAAAAQI9A/fIBIhH9IQEiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIQ4CfyAR/SEAIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyECAn8gBSoCKLtEAAAAAABAj0CiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEFQfj///8HIQpBiICAgHghDSALIAxNDQIgAv0RIA79HAEgBf0cAiESIAwhBQNAIAMgBUECdCICaiABIAAgAmooAgBBBHRq/QAAACAS/bUBIhH9GwAgEf0bAWogEf0bAmoiAjYCACACIAogAiAKSBshCiACIA0gAiANShshDSAFQQFqIgUgC0cNAAsMAgsgDQRAQfj///8HIQpBiICAgHghDSALIAxNDQIgDCEBA0AgAyABQQJ0IgVqAn8gAiAAIAVqKAIAQQJ0aioCALtEAAAAAAAAsECiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyIONgIAIAogDiAKIA5IGyEKIA0gDiANIA5KGyENIAFBAWoiASALRw0ACwwCCyAPRQRAIAsgDE0NASAFKgIoIRcgBSoCGCEYIAUqAgghGUH4////ByEKQYiAgIB4IQ0gDCEFA0ACfyAXIAEgACAFQQJ0IgdqKAIAQQR0aiICKgIIlCAZIAIqAgCUIBggAioCBJSSkrtEAAAAAAAAsECiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEOIAMgB2ogDjYCACAKIA4gCiAOSBshCiANIA4gDSAOShshDSAFQQFqIgUgC0cNAAsMAgsgCyAMTQ0AQX8hD0H4////ByEKQYiAgIB4IQ0gDCECA0AgDyAHIAAgAkECdCIUaigCAEECdCIVaigCACIORwRAIAX9CQI4IAggDkEGdGoiD/0JAgwgDyoCHP0gASAPKgIs/SACIA8qAjz9IAP95gEgBf0JAiggD/0JAgggDyoCGP0gASAPKgIo/SACIA8qAjj9IAP95gEgBf0JAgggD/0JAgAgDyoCEP0gASAPKgIg/SACIA8qAjD9IAP95gEgBf0JAhggD/0JAgQgDyoCFP0gASAPKgIk/SACIA8qAjT9IAP95gH95AH95AH95AEhESAOIQ8LIAMgFGoCfyAR/R8DIAEgFUECdCIOQQxyaioCAJQgEf0fAiABIA5BCHJqKgIAlCAR/R8AIAEgDmoqAgCUIBH9HwEgASAOQQRyaioCAJSSkpK7RAAAAAAAALBAoiIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAsiDjYCACAKIA4gCiAOSBshCiANIA4gDSAOShshDSACQQFqIgIgC0cNAAsMAQtBiICAgHghDUH4////ByEKCyALIAxLBEAgCUEBa7MgDbIgCrKTlSEXIAwhDQNAAn8gFyADIA1BAnRqIgEoAgAgCmuylCIYi0MAAABPXQRAIBioDAELQYCAgIB4CyEOIAEgDjYCACAEIA5BAnRqIgEgASgCAEEBajYCACANQQFqIg0gC0cNAAsLIAlBAk8EQCAEKAIAIQ1BASEKA0AgBCAKQQJ0aiIBIAEoAgAgDWoiDTYCACAKQQFqIgogCUcNAAsLIAxBAEoEQCAMIQoDQCAGIApBAWsiAUECdCICaiAAIAJqKAIANgIAIApBAUshAiABIQogAg0ACwsgCyAMSgRAIAshCgNAIAYgCyAEIAMgCkEBayIKQQJ0IgFqKAIAQQJ0aiICKAIAIgVrQQJ0aiAAIAFqKAIANgIAIAIgBUEBazYCACAKIAxKDQALCwsEAEEACw==";
-
-    var SorterWasmNoSIMD = "AGFzbQEAAAAADwhkeWxpbmsuMAEEAAAAAAEXAmAAAGAQf39/f39/f39/f39/f39/fwACEgEDZW52Bm1lbW9yeQIDAICABAMDAgABBz4DEV9fd2FzbV9jYWxsX2N0b3JzAAAYX193YXNtX2FwcGx5X2RhdGFfcmVsb2NzAAALc29ydEluZGV4ZXMAAQqiDwICAAucDwMBfAd9Bn8gCyAKayEMAkACQCAOBEAgDQRAQfj///8HIQpBiICAgHghDSALIAxNDQMgDCEFA0AgAyAFQQJ0IgFqIAIgACABaigCAEECdGooAgAiATYCACABIAogASAKSBshCiABIA0gASANShshDSAFQQFqIgUgC0cNAAsMAwsgDwRAIAsgDE0NAkF/IQ9B+P///wchCkGIgICAeCENIAwhAgNAIA8gByAAIAJBAnQiGmooAgBBAnQiG2ooAgAiDkcEQAJ/IAUqAjgiESAIIA5BBnRqIg8qAjyUIAUqAigiEiAPKgI4lCAFKgIIIhMgDyoCMJQgBSoCGCIUIA8qAjSUkpKSu0QAAAAAAECPQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIRgCfyARIA8qAiyUIBIgDyoCKJQgEyAPKgIglCAUIA8qAiSUkpKSu0QAAAAAAECPQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIRkCfyARIA8qAhyUIBIgDyoCGJQgEyAPKgIQlCAUIA8qAhSUkpKSu0QAAAAAAECPQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIRwCfyARIA8qAgyUIBIgDyoCCJQgEyAPKgIAlCAUIA8qAgSUkpKSu0QAAAAAAECPQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIR0gDiEPCyADIBpqIAEgG0ECdGoiDigCBCAcbCAOKAIAIB1saiAOKAIIIBlsaiAOKAIMIBhsaiIONgIAIA4gCiAKIA5KGyEKIA4gDSANIA5IGyENIAJBAWoiAiALRw0ACwwDCwJ/IAUqAii7RAAAAAAAQI9AoiIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAshAgJ/IAUqAhi7RAAAAAAAQI9AoiIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAshByALIAxNAn8gBSoCCLtEAAAAAABAj0CiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEPQfj///8HIQpBiICAgHghDQ0CIAwhBQNAIAMgBUECdCIIaiABIAAgCGooAgBBBHRqIggoAgQgB2wgCCgCACAPbGogCCgCCCACbGoiCDYCACAIIAogCCAKSBshCiAIIA0gCCANShshDSAFQQFqIgUgC0cNAAsMAgsgDQRAQfj///8HIQpBiICAgHghDSALIAxNDQIgDCEFA0AgAyAFQQJ0IgFqAn8gAiAAIAFqKAIAQQJ0aioCALtEAAAAAAAAsECiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyIONgIAIAogDiAKIA5IGyEKIA0gDiANIA5KGyENIAVBAWoiBSALRw0ACwwCCyAPRQRAIAsgDE0NASAFKgIoIREgBSoCGCESIAUqAgghE0H4////ByEKQYiAgIB4IQ0gDCEFA0ACfyARIAEgACAFQQJ0IgdqKAIAQQR0aiICKgIIlCATIAIqAgCUIBIgAioCBJSSkrtEAAAAAAAAsECiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEOIAMgB2ogDjYCACAKIA4gCiAOSBshCiANIA4gDSAOShshDSAFQQFqIgUgC0cNAAsMAgsgCyAMTQ0AQX8hD0H4////ByEKQYiAgIB4IQ0gDCECA0AgDyAHIAAgAkECdCIYaigCAEECdCIZaigCACIORwRAIAUqAjgiESAIIA5BBnRqIg8qAjyUIAUqAigiEiAPKgI4lCAFKgIIIhMgDyoCMJQgBSoCGCIUIA8qAjSUkpKSIRUgESAPKgIslCASIA8qAiiUIBMgDyoCIJQgFCAPKgIklJKSkiEWIBEgDyoCHJQgEiAPKgIYlCATIA8qAhCUIBQgDyoCFJSSkpIhFyARIA8qAgyUIBIgDyoCCJQgEyAPKgIAlCAUIA8qAgSUkpKSIREgDiEPCyADIBhqAn8gFSABIBlBAnRqIg4qAgyUIBYgDioCCJQgESAOKgIAlCAXIA4qAgSUkpKSu0QAAAAAAACwQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIg42AgAgCiAOIAogDkgbIQogDSAOIA0gDkobIQ0gAkEBaiICIAtHDQALDAELQYiAgIB4IQ1B+P///wchCgsgCyAMSwRAIAlBAWuzIA2yIAqyk5UhESAMIQ0DQAJ/IBEgAyANQQJ0aiIBKAIAIAprspQiEotDAAAAT10EQCASqAwBC0GAgICAeAshDiABIA42AgAgBCAOQQJ0aiIBIAEoAgBBAWo2AgAgDUEBaiINIAtHDQALCyAJQQJPBEAgBCgCACENQQEhCgNAIAQgCkECdGoiASABKAIAIA1qIg02AgAgCkEBaiIKIAlHDQALCyAMQQBKBEAgDCEKA0AgBiAKQQFrIgFBAnQiAmogACACaigCADYCACAKQQFLIAEhCg0ACwsgCyAMSgRAIAshCgNAIAYgCyAEIAMgCkEBayIKQQJ0IgFqKAIAQQJ0aiICKAIAIgVrQQJ0aiAAIAFqKAIANgIAIAIgBUEBazYCACAKIAxKDQALCws=";
-
-    var SorterWasmNonShared = "AGFzbQEAAAAADwhkeWxpbmsuMAEEAAAAAAEXAmAAAGAQf39/f39/f39/f39/f39/fwACDwEDZW52Bm1lbW9yeQIAAAMDAgABBz4DEV9fd2FzbV9jYWxsX2N0b3JzAAAYX193YXNtX2FwcGx5X2RhdGFfcmVsb2NzAAALc29ydEluZGV4ZXMAAQrrDwICAAvlDwQBfAN7B30DfyALIAprIQwCQAJAIA4EQCANBEBB+P///wchCkGIgICAeCENIAsgDE0NAyAMIQUDQCADIAVBAnQiAWogAiAAIAFqKAIAQQJ0aigCACIBNgIAIAEgCiABIApIGyEKIAEgDSABIA1KGyENIAVBAWoiBSALRw0ACwwDCyAPBEAgCyAMTQ0CQX8hD0H4////ByEKQYiAgIB4IQ0gDCECA0AgDyAHIAAgAkECdCIcaigCACIdQQJ0aigCACIbRwRAAn8gBf0JAjggCCAbQQZ0aiIO/QkCDCAOKgIc/SABIA4qAiz9IAIgDioCPP0gA/3mASAF/QkCKCAO/QkCCCAOKgIY/SABIA4qAij9IAIgDioCOP0gA/3mASAF/QkCCCAO/QkCACAOKgIQ/SABIA4qAiD9IAIgDioCMP0gA/3mASAF/QkCGCAO/QkCBCAOKgIU/SABIA4qAiT9IAIgDioCNP0gA/3mAf3kAf3kAf3kASIR/V/9DAAAAAAAQI9AAAAAAABAj0AiEv3yASIT/SEBIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEOAn8gE/0hACIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAv9ESAO/RwBAn8gESAR/Q0ICQoLDA0ODwABAgMAAQID/V8gEv3yASIR/SEAIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4C/0cAgJ/IBH9IQEiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgL/RwDIRIgGyEPCyADIBxqIAEgHUEEdGr9AAAAIBL9tQEiEf0bACAR/RsBaiAR/RsCaiAR/RsDaiIONgIAIA4gCiAKIA5KGyEKIA4gDSANIA5IGyENIAJBAWoiAiALRw0ACwwDCwJ/IAUqAgi7/RQgBSoCGLv9IgH9DAAAAAAAQI9AAAAAAABAj0D98gEiEf0hASIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAshDgJ/IBH9IQAiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLAn8gBSoCKLtEAAAAAABAj0CiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEFQfj///8HIQpBiICAgHghDSALIAxNDQL9ESAO/RwBIAX9HAIhEiAMIQUDQCADIAVBAnQiAmogASAAIAJqKAIAQQR0av0AAAAgEv21ASIR/RsAIBH9GwFqIBH9GwJqIgI2AgAgAiAKIAIgCkgbIQogAiANIAIgDUobIQ0gBUEBaiIFIAtHDQALDAILIA0EQEH4////ByEKQYiAgIB4IQ0gCyAMTQ0CIAwhBQNAIAMgBUECdCIBagJ/IAIgACABaigCAEECdGoqAgC7RAAAAAAAALBAoiIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAsiDjYCACAKIA4gCiAOSBshCiANIA4gDSAOShshDSAFQQFqIgUgC0cNAAsMAgsgD0UEQCALIAxNDQEgBSoCKCEUIAUqAhghFSAFKgIIIRZB+P///wchCkGIgICAeCENIAwhBQNAAn8gFCABIAAgBUECdCIHaigCAEEEdGoiAioCCJQgFiACKgIAlCAVIAIqAgSUkpK7RAAAAAAAALBAoiIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAshDiADIAdqIA42AgAgCiAOIAogDkgbIQogDSAOIA0gDkobIQ0gBUEBaiIFIAtHDQALDAILIAsgDE0NAEF/IQ9B+P///wchCkGIgICAeCENIAwhAgNAIA8gByAAIAJBAnQiG2ooAgBBAnQiHGooAgAiDkcEQCAFKgI4IhQgCCAOQQZ0aiIPKgI8lCAFKgIoIhUgDyoCOJQgBSoCCCIWIA8qAjCUIAUqAhgiFyAPKgI0lJKSkiEYIBQgDyoCLJQgFSAPKgIolCAWIA8qAiCUIBcgDyoCJJSSkpIhGSAUIA8qAhyUIBUgDyoCGJQgFiAPKgIQlCAXIA8qAhSUkpKSIRogFCAPKgIMlCAVIA8qAgiUIBYgDyoCAJQgFyAPKgIElJKSkiEUIA4hDwsgAyAbagJ/IBggASAcQQJ0aiIOKgIMlCAZIA4qAgiUIBQgDioCAJQgGiAOKgIElJKSkrtEAAAAAAAAsECiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyIONgIAIAogDiAKIA5IGyEKIA0gDiANIA5KGyENIAJBAWoiAiALRw0ACwwBC0GIgICAeCENQfj///8HIQoLIAsgDEsEQCAJQQFrsyANsiAKspOVIRQgDCENA0ACfyAUIAMgDUECdGoiASgCACAKa7KUIhWLQwAAAE9dBEAgFagMAQtBgICAgHgLIQ4gASAONgIAIAQgDkECdGoiASABKAIAQQFqNgIAIA1BAWoiDSALRw0ACwsgCUECTwRAIAQoAgAhDUEBIQoDQCAEIApBAnRqIgEgASgCACANaiINNgIAIApBAWoiCiAJRw0ACwsgDEEASgRAIAwhCgNAIAYgCkEBayIBQQJ0IgJqIAAgAmooAgA2AgAgCkEBSyABIQoNAAsLIAsgDEoEQCALIQoDQCAGIAsgBCADIApBAWsiCkECdCIBaigCAEECdGoiAigCACIFa0ECdGogACABaigCADYCACACIAVBAWs2AgAgCiAMSg0ACwsL";
-
-    var SorterWasmNoSIMDNonShared = "AGFzbQEAAAAADwhkeWxpbmsuMAEEAAAAAAEXAmAAAGAQf39/f39/f39/f39/f39/fwACDwEDZW52Bm1lbW9yeQIAAAMDAgABBz4DEV9fd2FzbV9jYWxsX2N0b3JzAAAYX193YXNtX2FwcGx5X2RhdGFfcmVsb2NzAAALc29ydEluZGV4ZXMAAQqiDwICAAucDwMBfAd9Bn8gCyAKayEMAkACQCAOBEAgDQRAQfj///8HIQpBiICAgHghDSALIAxNDQMgDCEFA0AgAyAFQQJ0IgFqIAIgACABaigCAEECdGooAgAiATYCACABIAogASAKSBshCiABIA0gASANShshDSAFQQFqIgUgC0cNAAsMAwsgDwRAIAsgDE0NAkF/IQ9B+P///wchCkGIgICAeCENIAwhAgNAIA8gByAAIAJBAnQiGmooAgBBAnQiG2ooAgAiDkcEQAJ/IAUqAjgiESAIIA5BBnRqIg8qAjyUIAUqAigiEiAPKgI4lCAFKgIIIhMgDyoCMJQgBSoCGCIUIA8qAjSUkpKSu0QAAAAAAECPQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIRgCfyARIA8qAiyUIBIgDyoCKJQgEyAPKgIglCAUIA8qAiSUkpKSu0QAAAAAAECPQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIRkCfyARIA8qAhyUIBIgDyoCGJQgEyAPKgIQlCAUIA8qAhSUkpKSu0QAAAAAAECPQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIRwCfyARIA8qAgyUIBIgDyoCCJQgEyAPKgIAlCAUIA8qAgSUkpKSu0QAAAAAAECPQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIR0gDiEPCyADIBpqIAEgG0ECdGoiDigCBCAcbCAOKAIAIB1saiAOKAIIIBlsaiAOKAIMIBhsaiIONgIAIA4gCiAKIA5KGyEKIA4gDSANIA5IGyENIAJBAWoiAiALRw0ACwwDCwJ/IAUqAii7RAAAAAAAQI9AoiIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAshAgJ/IAUqAhi7RAAAAAAAQI9AoiIQmUQAAAAAAADgQWMEQCAQqgwBC0GAgICAeAshByALIAxNAn8gBSoCCLtEAAAAAABAj0CiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEPQfj///8HIQpBiICAgHghDQ0CIAwhBQNAIAMgBUECdCIIaiABIAAgCGooAgBBBHRqIggoAgQgB2wgCCgCACAPbGogCCgCCCACbGoiCDYCACAIIAogCCAKSBshCiAIIA0gCCANShshDSAFQQFqIgUgC0cNAAsMAgsgDQRAQfj///8HIQpBiICAgHghDSALIAxNDQIgDCEFA0AgAyAFQQJ0IgFqAn8gAiAAIAFqKAIAQQJ0aioCALtEAAAAAAAAsECiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyIONgIAIAogDiAKIA5IGyEKIA0gDiANIA5KGyENIAVBAWoiBSALRw0ACwwCCyAPRQRAIAsgDE0NASAFKgIoIREgBSoCGCESIAUqAgghE0H4////ByEKQYiAgIB4IQ0gDCEFA0ACfyARIAEgACAFQQJ0IgdqKAIAQQR0aiICKgIIlCATIAIqAgCUIBIgAioCBJSSkrtEAAAAAAAAsECiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEOIAMgB2ogDjYCACAKIA4gCiAOSBshCiANIA4gDSAOShshDSAFQQFqIgUgC0cNAAsMAgsgCyAMTQ0AQX8hD0H4////ByEKQYiAgIB4IQ0gDCECA0AgDyAHIAAgAkECdCIYaigCAEECdCIZaigCACIORwRAIAUqAjgiESAIIA5BBnRqIg8qAjyUIAUqAigiEiAPKgI4lCAFKgIIIhMgDyoCMJQgBSoCGCIUIA8qAjSUkpKSIRUgESAPKgIslCASIA8qAiiUIBMgDyoCIJQgFCAPKgIklJKSkiEWIBEgDyoCHJQgEiAPKgIYlCATIA8qAhCUIBQgDyoCFJSSkpIhFyARIA8qAgyUIBIgDyoCCJQgEyAPKgIAlCAUIA8qAgSUkpKSIREgDiEPCyADIBhqAn8gFSABIBlBAnRqIg4qAgyUIBYgDioCCJQgESAOKgIAlCAXIA4qAgSUkpKSu0QAAAAAAACwQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIg42AgAgCiAOIAogDkgbIQogDSAOIA0gDkobIQ0gAkEBaiICIAtHDQALDAELQYiAgIB4IQ1B+P///wchCgsgCyAMSwRAIAlBAWuzIA2yIAqyk5UhESAMIQ0DQAJ/IBEgAyANQQJ0aiIBKAIAIAprspQiEotDAAAAT10EQCASqAwBC0GAgICAeAshDiABIA42AgAgBCAOQQJ0aiIBIAEoAgBBAWo2AgAgDUEBaiINIAtHDQALCyAJQQJPBEAgBCgCACENQQEhCgNAIAQgCkECdGoiASABKAIAIA1qIg02AgAgCkEBaiIKIAlHDQALCyAMQQBKBEAgDCEKA0AgBiAKQQFrIgFBAnQiAmogACACaigCADYCACAKQQFLIAEhCg0ACwsgCyAMSgRAIAshCgNAIAYgCyAEIAMgCkEBayIKQQJ0IgFqKAIAQQJ0aiICKAIAIgVrQQJ0aiAAIAFqKAIANgIAIAIgBUEBazYCACAKIAxKDQALCws=";
+    var SorterWasm = "AGFzbQEAAAAADAZkeWxpbmsAAAAAAAEbA2AAAGAQf39/f39/f39/f39/f39/fwBgAAF/AhIBA2VudgZtZW1vcnkCAwCAgAQDBAMAAQIHOQMRX193YXNtX2NhbGxfY3RvcnMAAAtzb3J0SW5kZXhlcwABE2Vtc2NyaXB0ZW5fdGxzX2luaXQAAgrHEAMDAAELuxAFAXwDewJ/A30CfiALIAprIQwCQCAOBEAgDQRAQfj///8HIQ5BiICAgHghDSALIAxNDQIgDCEBA0AgAyABQQJ0IgVqIAIgACAFaigCAEECdGooAgAiBTYCACAFIA4gBSAOSBshDiAFIA0gBSANShshDSABQQFqIgEgC0cNAAsMAgsgDwRAQfj///8HIQ5BiICAgHghDSALIAxNDQJBfyEPIAwhAgNAIA8gByAAIAJBAnQiFGooAgAiFUECdGooAgAiCkcEQAJ+IAX9CQIIIAggCkEGdGoiD/0JAgAgDyoCEP0gASAPKgIg/SACIA8qAjD9IAP95gEgBf0JAhggD/0JAgQgDyoCFP0gASAPKgIk/SACIA8qAjT9IAP95gH95AEgBf0JAiggD/0JAgggDyoCGP0gASAPKgIo/SACIA8qAjj9IAP95gH95AEgBf0JAjggD/0JAgwgDyoCHP0gASAPKgIs/SACIA8qAjz9IAP95gH95AEiEf0fArv9FCAR/R8Du/0iAf0MAAAAAABAj0AAAAAAAECPQCIS/fIBIhP9IQEiEJlEAAAAAAAA4ENjBEAgELAMAQtCgICAgICAgICAfwshGQJ+IBP9IQAiEJlEAAAAAAAA4ENjBEAgELAMAQtCgICAgICAgICAfwv9EiETAn4gEf0fALv9FCAR/R8Bu/0iASAS/fIBIhH9IQEiEJlEAAAAAAAA4ENjBEAgELAMAQtCgICAgICAgICAfwshGiATIBn9HgEhEgJ+IBH9IQAiEJlEAAAAAAAA4ENjBEAgELAMAQtCgICAgICAgICAfwv9EiAa/R4BIBL9DQABAgMICQoLEBESExgZGhshEiAKIQ8LIAMgFGogASAVQQR0av0AAAAgEv21ASIR/RsAIBH9GwFqIBH9GwJqIBH9GwNqIgo2AgAgCiAOIAogDkgbIQ4gCiANIAogDUobIQ0gAkEBaiICIAtHDQALDAILAn8gBSoCGLtEAAAAAABAj0CiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEKAn8gBSoCCLtEAAAAAABAj0CiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyECAn8gBSoCKLtEAAAAAABAj0CiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyEFQfj///8HIQ5BiICAgHghDSALIAxNDQEgAv0RIAr9HAEgBf0cAiESIAwhBQNAIAMgBUECdCICaiABIAAgAmooAgBBBHRq/QAAACAS/bUBIhH9GwAgEf0bAWogEf0bAmoiAjYCACACIA4gAiAOSBshDiACIA0gAiANShshDSAFQQFqIgUgC0cNAAsMAQsgDQRAQfj///8HIQ5BiICAgHghDSALIAxNDQEgDCEBA0AgAyABQQJ0IgVqAn8gAiAAIAVqKAIAQQJ0aioCALtEAAAAAAAAsECiIhCZRAAAAAAAAOBBYwRAIBCqDAELQYCAgIB4CyIKNgIAIAogDiAKIA5IGyEOIAogDSAKIA1KGyENIAFBAWoiASALRw0ACwwBCwJAIA9FBEAgCyAMSw0BQYiAgIB4IQ1B+P///wchDgwCC0H4////ByEOQYiAgIB4IQ0gCyAMTQ0BQX8hDyAMIQIDQCAPIAcgACACQQJ0IhRqKAIAQQJ0IhVqKAIAIgpHBEAgBf0JAgggCCAKQQZ0aiIP/QkCACAPKgIQ/SABIA8qAiD9IAIgDyoCMP0gA/3mASAF/QkCGCAP/QkCBCAPKgIU/SABIA8qAiT9IAIgDyoCNP0gA/3mAf3kASAF/QkCKCAP/QkCCCAPKgIY/SABIA8qAij9IAIgDyoCOP0gA/3mAf3kASAF/QkCOCAP/QkCDCAPKgIc/SABIA8qAiz9IAIgDyoCPP0gA/3mAf3kASERIAohDwsgAyAUagJ/IBEgASAVQQJ0IgpqKQIA/RL95gEiEv0fACAS/R8BkiARIBH9DQgJCgsMDQ4PAAAAAAAAAAAgASAKQQhyaikCAP0S/eYBIhL9HwCSIBL9HwGSu0QAAAAAAACwQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIgo2AgAgCiAOIAogDkgbIQ4gCiANIAogDUobIQ0gAkEBaiICIAtHDQALDAELIAUqAighFiAFKgIYIRcgBSoCCCEYQfj///8HIQ5BiICAgHghDSAMIQUDQAJ/IBggASAAIAVBAnQiB2ooAgBBBHRqIgIqAgCUIBcgAioCBJSSIBYgAioCCJSSu0QAAAAAAACwQKIiEJlEAAAAAAAA4EFjBEAgEKoMAQtBgICAgHgLIQogAyAHaiAKNgIAIAogDiAKIA5IGyEOIAogDSAKIA1KGyENIAVBAWoiBSALRw0ACwsgCyAMSwRAIAlBAWuzIA2yIA6yk5UhFiAMIQ0DQAJ/IBYgAyANQQJ0aiIBKAIAIA5rspQiF4tDAAAAT10EQCAXqAwBC0GAgICAeAshCiABIAo2AgAgBCAKQQJ0aiIBIAEoAgBBAWo2AgAgDUEBaiINIAtHDQALCyAJQQJPBEAgBCgCACENQQEhDgNAIAQgDkECdGoiASABKAIAIA1qIg02AgAgDkEBaiIOIAlHDQALCyAMQQBKBEAgDCEOA0AgBiAOQQFrIgFBAnQiAmogACACaigCADYCACAOQQFKIQIgASEOIAINAAsLIAsgDEoEQCALIQ4DQCAGIAsgBCADIA5BAWsiDkECdCIBaigCAEECdGoiAigCACIFa0ECdGogACABaigCADYCACACIAVBAWs2AgAgDCAOSA0ACwsLBABBAAs=";
 
     function sortWorker(self) {
 
@@ -11521,7 +8832,7 @@
         let splatCount;
         let indexesToSortOffset;
         let sortedIndexesOffset;
-        let sceneIndexesOffset;
+        let transformIndexesOffset;
         let transformsOffset;
         let precomputedDistancesOffset;
         let mappedDistancesOffset;
@@ -11530,8 +8841,7 @@
         let modelViewProjOffset;
         let countsZero;
         let sortedIndexesOut;
-        let distanceMapRange;
-        let uploadedSplatCount;
+
         let Constants;
 
         function sort(splatSortCount, splatRenderCount, modelViewProj,
@@ -11556,12 +8866,12 @@
                 }
             }
 
-            if (!countsZero) countsZero = new Uint32Array(distanceMapRange);
+            if (!countsZero) countsZero = new Uint32Array(Constants.DepthMapRange);
             new Float32Array(wasmMemory, modelViewProjOffset, 16).set(modelViewProj);
-            new Uint32Array(wasmMemory, frequenciesOffset, distanceMapRange).set(countsZero);
+            new Uint32Array(wasmMemory, frequenciesOffset, Constants.DepthMapRange).set(countsZero);
             wasmInstance.exports.sortIndexes(indexesToSortOffset, centersOffset, precomputedDistancesOffset,
                                              mappedDistancesOffset, frequenciesOffset, modelViewProjOffset,
-                                             sortedIndexesOffset, sceneIndexesOffset, transformsOffset, distanceMapRange,
+                                             sortedIndexesOffset, transformIndexesOffset, transformsOffset, Constants.DepthMapRange,
                                              splatSortCount, splatRenderCount, splatCount, usePrecomputedDistances, integerBasedSort,
                                              dynamicMode);
 
@@ -11589,7 +8899,7 @@
         self.onmessage = (e) => {
             if (e.data.centers) {
                 centers = e.data.centers;
-                sceneIndexes = e.data.sceneIndexes;
+                transformIndexes = e.data.transformIndexes;
                 if (integerBasedSort) {
                     new Int32Array(wasmMemory, centersOffset + e.data.range.from * Constants.BytesPerInt * 4,
                                    e.data.range.count * 4).set(new Int32Array(centers));
@@ -11598,13 +8908,15 @@
                                      e.data.range.count * 4).set(new Float32Array(centers));
                 }
                 if (dynamicMode) {
-                    new Uint32Array(wasmMemory, sceneIndexesOffset + e.data.range.from * 4,
-                                    e.data.range.count).set(new Uint32Array(sceneIndexes));
+                    new Uint32Array(wasmMemory, transformIndexesOffset + e.data.range.from * 4,
+                                    e.data.range.count).set(new Uint32Array(transformIndexes));
                 }
-                uploadedSplatCount = e.data.range.from + e.data.range.count;
+                self.postMessage({
+                    'centerDataSet': true,
+                });
             } else if (e.data.sort) {
-                const renderCount = Math.min(e.data.sort.splatRenderCount || 0, uploadedSplatCount);
-                const sortCount = Math.min(e.data.sort.splatSortCount || 0, uploadedSplatCount);
+                const renderCount = e.data.sort.splatRenderCount || 0;
+                const sortCount = e.data.sort.splatSortCount || 0;
                 const usePrecomputedDistances = e.data.sort.usePrecomputedDistances;
 
                 let copyIndexesToSort;
@@ -11625,8 +8937,6 @@
                 useSharedMemory = e.data.init.useSharedMemory;
                 integerBasedSort = e.data.init.integerBasedSort;
                 dynamicMode = e.data.init.dynamicMode;
-                distanceMapRange = e.data.init.distanceMapRange;
-                uploadedSplatCount = 0;
 
                 const CENTERS_BYTES_PER_ENTRY = integerBasedSort ? (Constants.BytesPerInt * 4) : (Constants.BytesPerFloat * 4);
 
@@ -11640,8 +8950,7 @@
                                                               (splatCount * Constants.BytesPerInt) : (splatCount * Constants.BytesPerFloat);
                 const memoryRequiredForMappedDistances = splatCount * Constants.BytesPerInt;
                 const memoryRequiredForSortedIndexes = splatCount * Constants.BytesPerInt;
-                const memoryRequiredForIntermediateSortBuffers = integerBasedSort ? (distanceMapRange * Constants.BytesPerInt * 2) :
-                                                                                    (distanceMapRange * Constants.BytesPerFloat * 2);
+                const memoryRequiredForIntermediateSortBuffers = Constants.DepthMapRange * Constants.BytesPerInt * 2;
                 const memoryRequiredforTransformIndexes = dynamicMode ? (splatCount * Constants.BytesPerInt) : 0;
                 const memoryRequiredforTransforms = dynamicMode ? (Constants.MaxScenes * matrixSize) : 0;
                 const extraMemory = Constants.MemoryPageSize * 32;
@@ -11661,8 +8970,8 @@
                     module: {},
                     env: {
                         memory: new WebAssembly.Memory({
-                            initial: totalPagesRequired,
-                            maximum: totalPagesRequired,
+                            initial: totalPagesRequired * 2,
+                            maximum: totalPagesRequired * 4,
                             shared: true,
                         }),
                     }
@@ -11680,8 +8989,8 @@
                     mappedDistancesOffset = precomputedDistancesOffset + memoryRequiredForPrecomputedDistances;
                     frequenciesOffset = mappedDistancesOffset + memoryRequiredForMappedDistances;
                     sortedIndexesOffset = frequenciesOffset + memoryRequiredForIntermediateSortBuffers;
-                    sceneIndexesOffset = sortedIndexesOffset + memoryRequiredForSortedIndexes;
-                    transformsOffset = sceneIndexesOffset + memoryRequiredforTransformIndexes;
+                    transformIndexesOffset = sortedIndexesOffset + memoryRequiredForSortedIndexes;
+                    transformsOffset = transformIndexesOffset + memoryRequiredforTransformIndexes;
                     wasmMemory = sorterWasmImport.env.memory.buffer;
                     if (useSharedMemory) {
                         self.postMessage({
@@ -11705,8 +9014,7 @@
         };
     }
 
-    function createSortWorker(splatCount, useSharedMemory, enableSIMDInSort, integerBasedSort, dynamicMode,
-                                     splatSortDistanceMapPrecision = Constants.DefaultSplatSortDistanceMapPrecision) {
+    function createSortWorker(splatCount, useSharedMemory, integerBasedSort, dynamicMode) {
         const worker = new Worker(
             URL.createObjectURL(
                 new Blob(['(', sortWorker.toString(), ')(self)'], {
@@ -11715,27 +9023,7 @@
             ),
         );
 
-        let sourceWasm = SorterWasm;
-
-        // iOS makes choosing the right WebAssembly configuration tricky :(
-        const iOSSemVer = isIOS() ? getIOSSemever() : null;
-        if (!enableSIMDInSort && !useSharedMemory) {
-            sourceWasm = SorterWasmNoSIMD;
-            // Testing on various devices has shown that even when shared memory is disabled, the WASM module with shared
-            // memory can still be used most of the time -- the exception seems to be iOS devices below 16.4
-            if (iOSSemVer && iOSSemVer.major <= 16 && iOSSemVer.minor < 4) {
-                sourceWasm = SorterWasmNoSIMDNonShared;
-            }
-        } else if (!enableSIMDInSort) {
-            sourceWasm = SorterWasmNoSIMD;
-        } else if (!useSharedMemory) {
-            // Same issue with shared memory as above on iOS devices
-            if (iOSSemVer && iOSSemVer.major <= 16 && iOSSemVer.minor < 4) {
-                sourceWasm = SorterWasmNonShared;
-            }
-        }
-
-        const sorterWasmBinaryString = atob(sourceWasm);
+        const sorterWasmBinaryString = atob(SorterWasm);
         const sorterWasmBytes = new Uint8Array(sorterWasmBinaryString.length);
         for (let i = 0; i < sorterWasmBinaryString.length; i++) {
             sorterWasmBytes[i] = sorterWasmBinaryString.charCodeAt(i);
@@ -11748,11 +9036,11 @@
                 'useSharedMemory': useSharedMemory,
                 'integerBasedSort': integerBasedSort,
                 'dynamicMode': dynamicMode,
-                'distanceMapRange': 1 << splatSortDistanceMapPrecision,
                 // Super hacky
                 'Constants': {
                     'BytesPerFloat': Constants.BytesPerFloat,
                     'BytesPerInt': Constants.BytesPerInt,
+                    'DepthMapRange': Constants.DepthMapRange,
                     'MemoryPageSize': Constants.MemoryPageSize,
                     'MaxScenes': Constants.MaxScenes
                 }
@@ -11783,7 +9071,7 @@
 
     class VRButton {
 
-        static createButton( renderer, sessionInit = {} ) {
+        static createButton( renderer ) {
 
             const button = document.createElement( 'button' );
 
@@ -11829,15 +9117,7 @@
                 // ('local' is always available for immersive sessions and doesn't need to
                 // be requested separately.)
 
-                const sessionOptions = {
-                    ...sessionInit,
-                    optionalFeatures: [
-                        'local-floor',
-                        'bounded-floor',
-                        'layers',
-                        ...( sessionInit.optionalFeatures || [] )
-                    ],
-                };
+                const sessionInit = { optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers'] };
 
                 button.onmouseenter = function() {
 
@@ -11855,7 +9135,7 @@
 
                     if ( currentSession === null ) {
 
-                        navigator.xr.requestSession( 'immersive-vr', sessionOptions ).then( onSessionStarted );
+                        navigator.xr.requestSession( 'immersive-vr', sessionInit ).then( onSessionStarted );
 
                     } else {
 
@@ -11863,7 +9143,7 @@
 
                         if ( navigator.xr.offerSession !== undefined ) {
 
-                            navigator.xr.offerSession( 'immersive-vr', sessionOptions )
+                            navigator.xr.offerSession( 'immersive-vr', sessionInit )
                                 .then( onSessionStarted )
                                 .catch( ( err ) => {
 
@@ -11879,7 +9159,7 @@
 
                 if ( navigator.xr.offerSession !== undefined ) {
 
-                    navigator.xr.offerSession( 'immersive-vr', sessionOptions )
+                    navigator.xr.offerSession( 'immersive-vr', sessionInit )
                         .then( onSessionStarted )
                         .catch( ( err ) => {
 
@@ -12310,7 +9590,7 @@
             // Tells the viewer to pretend the device pixel ratio is 1, which can boost performance on devices where it is larger,
             // at a small cost to visual quality
             this.ignoreDevicePixelRatio = options.ignoreDevicePixelRatio || false;
-            this.devicePixelRatio = this.ignoreDevicePixelRatio ? 1 : (window.devicePixelRatio || 1);
+            this.devicePixelRatio = this.ignoreDevicePixelRatio ? 1 : window.devicePixelRatio;
 
             // Tells the viewer to use 16-bit floating point values when storing splat covariance data in textures, instead of 32-bit
             this.halfPrecisionCovariancesOnGPU = options.halfPrecisionCovariancesOnGPU || false;
@@ -12339,7 +9619,7 @@
             // https://web.dev/articles/cross-origin-isolation-guide
             // If enabled, it requires specific CORS headers to be present in the response from the server that is sent when
             // loading the application. More information is available in the README.
-            if (options.sharedMemoryForWorkers === undefined || options.sharedMemoryForWorkers === null) options.sharedMemoryForWorkers = true;
+            if (options.sharedMemoryForWorkers === undefined || options.sharedMemoryForWorkers === null) options.sharedMemoryForWorkers = false;
             this.sharedMemoryForWorkers = options.sharedMemoryForWorkers;
 
             // if 'dynamicScene' is true, it tells the viewer to assume scene elements are not stationary or that the number of splats in the
@@ -12355,16 +9635,11 @@
             // https://github.com/graphdeco-inria/gaussian-splatting/issues/294#issuecomment-1772688093
             this.antialiased = options.antialiased || false;
 
-            // This constant is added to the projected 2D screen-space splat scales
-            this.kernel2DSize = (options.kernel2DSize === undefined) ? 0.3 : options.kernel2DSize;
-
             this.webXRMode = options.webXRMode || WebXRMode.None;
             if (this.webXRMode !== WebXRMode.None) {
                 this.gpuAcceleratedSort = false;
             }
             this.webXRActive = false;
-
-            this.webXRSessionInit = options.webXRSessionInit || {};
 
             // if 'renderMode' is RenderMode.Always, then the viewer will rrender the scene on every update. If it is RenderMode.OnChange,
             // it will only render when something in the scene has changed.
@@ -12381,72 +9656,15 @@
             this.focalAdjustment = options.focalAdjustment || 1.0;
 
             // Specify the maximum screen-space splat size, can help deal with large splats that get too unwieldy
-            this.maxScreenSpaceSplatSize = options.maxScreenSpaceSplatSize || 1024;
+            this.maxScreenSpaceSplatSize = options.maxScreenSpaceSplatSize || 2048;
 
             // The verbosity of console logging
             this.logLevel = options.logLevel || LogLevel.None;
 
             // Degree of spherical harmonics to utilize in rendering splats (assuming the data is present in the splat scene).
-            // Valid values are 0 - 2. Default value is 0.
+            // Valid values are 0 - 3. Default value is 0.
             this.sphericalHarmonicsDegree = options.sphericalHarmonicsDegree || 0;
 
-            // When true, allows for usage of extra properties and attributes during rendering for effects such as opacity adjustment.
-            // Default is false for performance reasons. These properties are separate from transform properties (scale, rotation, position)
-            // that are enabled by the 'dynamicScene' parameter.
-            this.enableOptionalEffects = options.enableOptionalEffects || false;
-
-            // Enable the usage of SIMD WebAssembly instructions for the splat sort
-            if (options.enableSIMDInSort === undefined || options.enableSIMDInSort === null) options.enableSIMDInSort = true;
-            this.enableSIMDInSort = options.enableSIMDInSort;
-
-            // Level to compress non KSPLAT files when loading them for direct rendering
-            if (options.inMemoryCompressionLevel === undefined || options.inMemoryCompressionLevel === null) {
-                options.inMemoryCompressionLevel = 0;
-            }
-            this.inMemoryCompressionLevel = options.inMemoryCompressionLevel;
-
-            // Reorder splat data in memory after loading is complete to optimize cache utilization. Default is true.
-            // Does not apply if splat scene is progressively loaded.
-            if (options.optimizeSplatData === undefined || options.optimizeSplatData === null) {
-                options.optimizeSplatData = true;
-            }
-            this.optimizeSplatData = options.optimizeSplatData;
-
-            // When true, the intermediate splat data that is the result of decompressing splat bufffer(s) and is used to
-            // populate the data textures will be freed. This will reduces memory usage, but if that data needs to be modified
-            // it will need to be re-populated from the splat buffer(s). Default is false.
-            if (options.freeIntermediateSplatData === undefined || options.freeIntermediateSplatData === null) {
-                options.freeIntermediateSplatData = false;
-            }
-            this.freeIntermediateSplatData = options.freeIntermediateSplatData;
-
-            // It appears that for certain iOS versions, special actions need to be taken with the
-            // usage of SIMD instructions and shared memory
-            if (isIOS()) {
-                const semver = getIOSSemever();
-                if (semver.major < 17) {
-                    this.enableSIMDInSort = false;
-                }
-                if (semver.major < 16) {
-                    this.sharedMemoryForWorkers = false;
-                }
-            }
-
-            // Tell the viewer how to render the splats
-            if (options.splatRenderMode === undefined || options.splatRenderMode === null) {
-                options.splatRenderMode = SplatRenderMode.ThreeD;
-            }
-            this.splatRenderMode = options.splatRenderMode;
-
-            // Customize the speed at which the scene is revealed
-            this.sceneFadeInRateMultiplier = options.sceneFadeInRateMultiplier || 1.0;
-
-            // Set the range for the depth map for the counting sort used to sort the splats
-            this.splatSortDistanceMapPrecision = options.splatSortDistanceMapPrecision || Constants.DefaultSplatSortDistanceMapPrecision;
-            const maxPrecision = this.integerBasedSort ? 20 : 24;
-            this.splatSortDistanceMapPrecision = clamp(this.splatSortDistanceMapPrecision, 10, maxPrecision);
-
-            this.onSplatMeshChangedCallback = null;
             this.createSplatMesh();
 
             this.controls = null;
@@ -12465,14 +9683,11 @@
             this.sortWorker = null;
             this.sortRunning = false;
             this.splatRenderCount = 0;
-            this.splatSortCount = 0;
-            this.lastSplatSortCount = 0;
             this.sortWorkerIndexesToSort = null;
             this.sortWorkerSortedIndexes = null;
             this.sortWorkerPrecomputedDistances = null;
             this.sortWorkerTransforms = null;
-            this.preSortMessages = [];
-            this.runAfterNextSort = [];
+            this.runAfterFirstSort = [];
 
             this.selfDrivenModeRunning = false;
             this.splatRenderReady = false;
@@ -12519,17 +9734,14 @@
             this.initialized = false;
             this.disposing = false;
             this.disposed = false;
-            this.disposePromise = null;
             if (!this.dropInMode) this.init();
         }
 
         createSplatMesh() {
-            this.splatMesh = new SplatMesh(this.splatRenderMode, this.dynamicScene, this.enableOptionalEffects,
-                                           this.halfPrecisionCovariancesOnGPU, this.devicePixelRatio, this.gpuAcceleratedSort,
-                                           this.integerBasedSort, this.antialiased, this.maxScreenSpaceSplatSize, this.logLevel,
-                                           this.sphericalHarmonicsDegree, this.sceneFadeInRateMultiplier, this.kernel2DSize);
+            this.splatMesh = new SplatMesh(this.dynamicScene, this.halfPrecisionCovariancesOnGPU, this.devicePixelRatio,
+                                           this.gpuAcceleratedSort, this.integerBasedSort, this.antialiased,
+                                           this.maxScreenSpaceSplatSize, this.logLevel, this.sphericalHarmonicsDegree);
             this.splatMesh.frustumCulled = false;
-            if (this.onSplatMeshChangedCallback) this.onSplatMeshChangedCallback();
         }
 
         init() {
@@ -12544,13 +9756,13 @@
                     this.rootElement.style.position = 'absolute';
                     document.body.appendChild(this.rootElement);
                 } else {
-                    this.rootElement = this.renderer.domElement || document.body;
+                    this.rootElement = this.renderer.domElement.parentElement || document.body;
                 }
             }
 
             this.setupCamera();
             this.setupRenderer();
-            this.setupWebXR(this.webXRSessionInit);
+            this.setupWebXR();
             this.setupControls();
             this.setupEventHandlers();
 
@@ -12607,12 +9819,12 @@
 
         }
 
-        setupWebXR(webXRSessionInit) {
+        setupWebXR() {
             if (this.webXRMode) {
                 if (this.webXRMode === WebXRMode.VR) {
-                    this.rootElement.appendChild(VRButton.createButton(this.renderer, webXRSessionInit));
+                    this.rootElement.appendChild(VRButton.createButton(this.renderer));
                 } else if (this.webXRMode === WebXRMode.AR) {
-                    this.rootElement.appendChild(ARButton.createButton(this.renderer, webXRSessionInit));
+                    this.rootElement.appendChild(ARButton.createButton(this.renderer));
                 }
                 this.renderer.xr.addEventListener('sessionstart', (e) => {
                     this.webXRActive = true;
@@ -12639,7 +9851,7 @@
                         this.perspectiveControls = new OrbitControls(this.camera, this.renderer.domElement);
                     }
                 }
-                for (let controls of [this.orthographicControls, this.perspectiveControls,]) {
+                for (let controls of [this.perspectiveControls, this.orthographicControls]) {
                     if (controls) {
                         controls.listenToKeyEvents(window);
                         controls.rotateSpeed = 0.5;
@@ -12650,9 +9862,9 @@
                         controls.target.copy(this.initialCameraLookAt);
                         controls.update();
                     }
+
                 }
                 this.controls = this.camera.isOrthographicCamera ? this.orthographicControls : this.perspectiveControls;
-                this.controls.update();
             }
         }
 
@@ -12686,15 +9898,6 @@
             this.renderMode = renderMode;
         }
 
-        setActiveSphericalHarmonicsDegrees(activeSphericalHarmonicsDegrees) {
-            this.splatMesh.material.uniforms.sphericalHarmonicsDegree.value = activeSphericalHarmonicsDegrees;
-            this.splatMesh.material.uniformsNeedUpdate = true;
-        }
-
-        onSplatMeshChanged(callback) {
-            this.onSplatMeshChangedCallback = callback;
-        }
-
         onKeyDown = function() {
 
             const forward = new THREE__namespace.Vector3();
@@ -12715,10 +9918,10 @@
                         this.focalAdjustment -= 0.02;
                         this.forceRenderNextFrame();
                     break;
-                    case 'ArrowLeft':
+                    case 'KeyA':
                         this.camera.up.transformDirection(tempMatrixLeft);
                     break;
-                    case 'ArrowRight':
+                    case 'KeyD':
                         this.camera.up.transformDirection(tempMatrixRight);
                     break;
                     case 'KeyC':
@@ -12786,7 +9989,7 @@
 
         onMouseClick(mouse) {
             this.mousePosition.set(mouse.offsetX, mouse.offsetY);
-            this.checkForFocalPointChange();
+            //this.checkForFocalPointChange();  //Disabled Target Change
         }
 
         checkForFocalPointChange = function() {
@@ -12893,7 +10096,6 @@
                 if (!this.splatMesh) return;
                 const splatCount = this.splatMesh.getSplatCount();
                 if (splatCount > 0) {
-                    this.splatMesh.updateVisibleRegionFadeDistance(this.sceneRevealMode);
                     this.splatMesh.updateTransforms();
                     this.getRenderDimensions(renderDimensions);
                     const focalLengthX = this.camera.projectionMatrix.elements[0] * 0.5 *
@@ -12966,7 +10168,6 @@
          *
          *         onProgress:                 Function to be called as file data are received, or other processing occurs
          *
-         *         headers:                    Optional HTTP headers to be sent along with splat requests
          * }
          * @return {AbortablePromise}
          */
@@ -12980,13 +10181,8 @@
                 throw new Error('Cannot add splat scene after dispose() is called.');
             }
 
-            if (options.progressiveLoad && this.splatMesh.scenes && this.splatMesh.scenes.length > 0) {
-                console.log('addSplatScene(): "progressiveLoad" option ignore because there are multiple splat scenes');
-                options.progressiveLoad = false;
-            }
-
             const format = (options.format !== undefined && options.format !== null) ? options.format : sceneFormatFromPath(path);
-            const progressiveLoad = Viewer.isProgressivelyLoadable(format) && options.progressiveLoad;
+            const streamBuildSections = Viewer.isStreamable(format) && options.streamView;
             const showLoadingUI = (options.showLoadingUI !== undefined && options.showLoadingUI !== null) ? options.showLoadingUI : true;
 
             let loadingUITaskId = null;
@@ -13005,7 +10201,7 @@
                         if (percentComplete == 100) {
                             this.loadingSpinner.setMessageForTask(loadingUITaskId, 'Download complete!');
                         } else {
-                            if (progressiveLoad) {
+                            if (streamBuildSections) {
                                 this.loadingSpinner.setMessageForTask(loadingUITaskId, 'Downloading splats...');
                             } else {
                                 const suffix = percentCompleteLabel ? `: ${percentCompleteLabel}` : `...`;
@@ -13014,6 +10210,8 @@
                         }
                     } else if (loaderStatus === LoaderStatus.Processing) {
                         this.loadingSpinner.setMessageForTask(loadingUITaskId, 'Processing splats...');
+                    } else {
+                        this.loadingSpinner.setMessageForTask(loadingUITaskId, 'Ready!');
                     }
                 }
             };
@@ -13022,11 +10220,13 @@
             let downloadedPercentage = 0;
             const splatBuffersAddedUIUpdate = (firstBuild, finalBuild) => {
                 if (showLoadingUI) {
-                    if (firstBuild && progressiveLoad || finalBuild && !progressiveLoad) {
-                        this.loadingSpinner.removeTask(loadingUITaskId);
-                        if (!finalBuild && !downloadDone) this.loadingProgressBar.show();
+                    if (firstBuild && streamBuildSections || finalBuild && !streamBuildSections) {
+                        this.runAfterFirstSort.push(() => {
+                            this.loadingSpinner.removeTask(loadingUITaskId);
+                            if (!finalBuild && !downloadDone) this.loadingProgressBar.show();
+                        });
                     }
-                    if (progressiveLoad) {
+                    if (streamBuildSections) {
                         if (finalBuild) {
                             downloadDone = true;
                             this.loadingProgressBar.hide();
@@ -13044,7 +10244,7 @@
             };
 
             const buildSection = (splatBuffer, firstBuild, finalBuild) => {
-                if (!progressiveLoad && options.onProgress) options.onProgress(0, '0%', LoaderStatus.Processing);
+                if (!streamBuildSections && options.onProgress) options.onProgress(0, '0%', LoaderStatus.Processing);
                 const addSplatBufferOptions = {
                     'rotation': options.rotation || options.orientation,
                     'position': options.position,
@@ -13052,42 +10252,34 @@
                     'splatAlphaRemovalThreshold': options.splatAlphaRemovalThreshold,
                 };
                 return this.addSplatBuffers([splatBuffer], [addSplatBufferOptions],
-                                             finalBuild, firstBuild && showLoadingUI, showLoadingUI,
-                                             progressiveLoad, progressiveLoad).then(() => {
-                    if (!progressiveLoad && options.onProgress) options.onProgress(100, '100%', LoaderStatus.Processing);
+                                             finalBuild, firstBuild && showLoadingUI, showLoadingUI).then(() => {
+                    if (!streamBuildSections && options.onProgress) options.onProgress(100, '100%', LoaderStatus.Processing);
                     splatBuffersAddedUIUpdate(firstBuild, finalBuild);
                 });
             };
 
-            const loadFunc = progressiveLoad ? this.downloadAndBuildSingleSplatSceneProgressiveLoad.bind(this) :
-                                               this.downloadAndBuildSingleSplatSceneStandardLoad.bind(this);
-            return loadFunc(path, format, options.splatAlphaRemovalThreshold, buildSection.bind(this),
-                            onProgress, hideLoadingUI.bind(this), options.headers);
+            const loadFunc = streamBuildSections ? this.downloadAndBuildSingleSplatSceneStreaming.bind(this) :
+                                                   this.downloadAndBuildSingleSplatSceneNonStreaming.bind(this);
+            return loadFunc(path, format, options.splatAlphaRemovalThreshold, buildSection.bind(this), onProgress, hideLoadingUI.bind(this));
         }
 
         /**
-         * Download a single splat scene, convert to splat buffer and then rebuild the viewer's splat mesh
-         * by calling 'buildFunc' -- all before displaying the scene. Also sets/clears relevant instance synchronization objects,
-         * and calls appropriate functions on success or failure.
+         * Download a single non-streamed splat scene, convert to splat buffer and then rebuild the viewer's splat mesh
+         * by calling 'buildFunc'. Also sets/clears relevant instance synchronization objects, and calls appropriate functions
+         * on success or failure.
          * @param {string} path Path to splat scene to be loaded
          * @param {SceneFormat} format Format of the splat scene file
          * @param {number} splatAlphaRemovalThreshold Ignore any splats with an alpha less than the specified value (valid range: 0 - 255)
          * @param {function} buildFunc Function to build the viewer's splat mesh with the downloaded splat buffer
          * @param {function} onProgress Function to be called as file data are received, or other processing occurs
          * @param {function} onException Function to be called when exception occurs
-         * @param {object} headers Optional HTTP headers to pass to use for downloading splat scene
          * @return {AbortablePromise}
          */
-        downloadAndBuildSingleSplatSceneStandardLoad(path, format, splatAlphaRemovalThreshold, buildFunc, onProgress, onException, headers) {
-
-            const downloadPromise = this.downloadSplatSceneToSplatBuffer(path, splatAlphaRemovalThreshold, onProgress, false,
-                                                                         undefined, format, headers);
-            const downloadAndBuildPromise = abortablePromiseWithExtractedComponents(downloadPromise.abortHandler);
-
-            downloadPromise.then((splatBuffer) => {
+        downloadAndBuildSingleSplatSceneNonStreaming(path, format, splatAlphaRemovalThreshold, buildFunc, onProgress, onException) {
+            const downloadPromise = this.downloadSplatSceneToSplatBuffer(path, splatAlphaRemovalThreshold, onProgress, false, undefined, format)
+            .then((splatBuffer) => {
                 this.removeSplatSceneDownloadPromise(downloadPromise);
                 return buildFunc(splatBuffer, true, true).then(() => {
-                    downloadAndBuildPromise.resolve();
                     this.clearSplatSceneDownloadAndBuildPromise();
                 });
             })
@@ -13095,17 +10287,19 @@
                 if (onException) onException();
                 this.clearSplatSceneDownloadAndBuildPromise();
                 this.removeSplatSceneDownloadPromise(downloadPromise);
-                downloadAndBuildPromise.reject(this.updateError(e, `Viewer::addSplatScene -> Could not load file ${path}`));
+                if (!(e instanceof AbortedPromiseError)) {
+                    throw (new Error(`Viewer::addSplatScene -> Could not load file ${path}`));
+                }
             });
 
             this.addSplatSceneDownloadPromise(downloadPromise);
-            this.setSplatSceneDownloadAndBuildPromise(downloadAndBuildPromise.promise);
+            this.setSplatSceneDownloadAndBuildPromise(downloadPromise);
 
-            return downloadAndBuildPromise.promise;
+            return downloadPromise;
         }
 
         /**
-         * Download a single splat scene and convert to splat buffer in a progressive manner, allowing rendering as the file downloads.
+         * Download a single splat scene and convert to splat buffer in a streamed manner, allowing rendering as the file downloads.
          * As each section is downloaded, the viewer's splat mesh is rebuilt by calling 'buildFunc'
          * Also sets/clears relevant instance synchronization objects, and calls appropriate functions on success or failure.
          * @param {string} path Path to splat scene to be loaded
@@ -13114,60 +10308,67 @@
          * @param {function} buildFunc Function to rebuild the viewer's splat mesh after a new splat buffer section is downloaded
          * @param {function} onDownloadProgress Function to be called as file data are received
          * @param {function} onDownloadException Function to be called when exception occurs at any point during the full download
-         * @param {object} headers Optional HTTP headers to pass to use for downloading splat scene
          * @return {AbortablePromise}
          */
-        downloadAndBuildSingleSplatSceneProgressiveLoad(path, format, splatAlphaRemovalThreshold, buildFunc,
-                                                        onDownloadProgress, onDownloadException, headers) {
-            let progressiveLoadedSectionBuildCount = 0;
-            let progressiveLoadedSectionBuilding = false;
-            const queuedProgressiveLoadSectionBuilds = [];
+        downloadAndBuildSingleSplatSceneStreaming(path, format, splatAlphaRemovalThreshold, buildFunc,
+                                                  onDownloadProgress, onDownloadException) {
+            let firstStreamedSectionDownloadAndBuildResolver;
+            let firstStreamedSectionDownloadAndBuildRejecter;
+            let splatSceneDownloadAndBuildResolver;
+            let splatSceneDownloadAndBuildRejecter;
+            let steamedSectionBuildCount = 0;
+            let streamedSectionBuilding = false;
+            const queuedStreamedSectionBuilds = [];
 
-            const checkAndBuildProgressiveLoadSections = () => {
-                if (queuedProgressiveLoadSectionBuilds.length > 0 &&
-                    !progressiveLoadedSectionBuilding &&
-                    !this.isDisposingOrDisposed()) {
-                    progressiveLoadedSectionBuilding = true;
-                    const queuedBuild = queuedProgressiveLoadSectionBuilds.shift();
+            const checkAndBuildStreamedSections = () => {
+                if (queuedStreamedSectionBuilds.length > 0 && !streamedSectionBuilding && !this.isDisposingOrDisposed()) {
+                    streamedSectionBuilding = true;
+                    const queuedBuild = queuedStreamedSectionBuilds.shift();
                     buildFunc(queuedBuild.splatBuffer, queuedBuild.firstBuild, queuedBuild.finalBuild)
                     .then(() => {
-                        progressiveLoadedSectionBuilding = false;
+                        streamedSectionBuilding = false;
                         if (queuedBuild.firstBuild) {
-                            progressiveLoadFirstSectionBuildPromise.resolve();
+                            firstStreamedSectionDownloadAndBuildRejecter = null;
+                            firstStreamedSectionDownloadAndBuildResolver();
                         } else if (queuedBuild.finalBuild) {
-                            splatSceneDownloadAndBuildPromise.resolve();
+                            splatSceneDownloadAndBuildResolver();
                             this.clearSplatSceneDownloadAndBuildPromise();
                         }
-                        if (queuedProgressiveLoadSectionBuilds.length > 0) {
-                            delayedExecute(() => checkAndBuildProgressiveLoadSections());
-                        }
+                        if (queuedStreamedSectionBuilds.length > 0) delayedExecute(() => checkAndBuildStreamedSections());
                     });
                 }
             };
 
-            const onProgressiveLoadSectionProgress = (splatBuffer, finalBuild) => {
+            const onStreamedSectionProgress = (splatBuffer, finalBuild) => {
                 if (!this.isDisposingOrDisposed()) {
-                    if (finalBuild || queuedProgressiveLoadSectionBuilds.length === 0 ||
-                        splatBuffer.getSplatCount() > queuedProgressiveLoadSectionBuilds[0].splatBuffer.getSplatCount()) {
-                        queuedProgressiveLoadSectionBuilds.push({
+                    if (finalBuild || queuedStreamedSectionBuilds.length === 0 ||
+                        splatBuffer.getSplatCount() > queuedStreamedSectionBuilds[0].splatBuffer.getSplatCount()) {
+                        queuedStreamedSectionBuilds.push({
                             splatBuffer,
-                            firstBuild: progressiveLoadedSectionBuildCount === 0,
+                            firstBuild: steamedSectionBuildCount === 0,
                             finalBuild
                         });
-                        progressiveLoadedSectionBuildCount++;
-                        checkAndBuildProgressiveLoadSections();
+                        steamedSectionBuildCount++;
+                        checkAndBuildStreamedSections();
                     }
                 }
             };
 
-            const splatSceneDownloadPromise = this.downloadSplatSceneToSplatBuffer(path, splatAlphaRemovalThreshold, onDownloadProgress, true,
-                                                                                   onProgressiveLoadSectionProgress, format, headers);
+            let splatSceneDownloadPromise = this.downloadSplatSceneToSplatBuffer(path, splatAlphaRemovalThreshold,
+                                                                                 onDownloadProgress, true, onStreamedSectionProgress, format);
 
-            const progressiveLoadFirstSectionBuildPromise = abortablePromiseWithExtractedComponents(splatSceneDownloadPromise.abortHandler);
-            const splatSceneDownloadAndBuildPromise = abortablePromiseWithExtractedComponents();
+            const firstStreamedSectionBuildPromise = new AbortablePromise((resolver, rejecter) => {
+                firstStreamedSectionDownloadAndBuildResolver = resolver;
+                firstStreamedSectionDownloadAndBuildRejecter = rejecter;
+            }, splatSceneDownloadPromise.abortHandler);
+
+            const splatSceneDownloadAndBuildPromise = new AbortablePromise((resolver, rejecter) => {
+                splatSceneDownloadAndBuildResolver = resolver;
+                splatSceneDownloadAndBuildRejecter = rejecter;
+            });
 
             this.addSplatSceneDownloadPromise(splatSceneDownloadPromise);
-            this.setSplatSceneDownloadAndBuildPromise(splatSceneDownloadAndBuildPromise.promise);
+            this.setSplatSceneDownloadAndBuildPromise(splatSceneDownloadAndBuildPromise);
 
             splatSceneDownloadPromise.then(() => {
                 this.removeSplatSceneDownloadPromise(splatSceneDownloadPromise);
@@ -13175,12 +10376,14 @@
             .catch((e) => {
                 this.clearSplatSceneDownloadAndBuildPromise();
                 this.removeSplatSceneDownloadPromise(splatSceneDownloadPromise);
-                const error = this.updateError(e, `Viewer::addSplatScene -> Could not load one or more scenes`);
-                progressiveLoadFirstSectionBuildPromise.reject(error);
-                if (onDownloadException) onDownloadException(error);
+                if (!(e instanceof AbortedPromiseError)) {
+                    splatSceneDownloadAndBuildRejecter(e);
+                    if (firstStreamedSectionDownloadAndBuildRejecter) firstStreamedSectionDownloadAndBuildRejecter(e);
+                    if (onDownloadException) onDownloadException(e);
+                }
             });
 
-            return progressiveLoadFirstSectionBuildPromise.promise;
+            return firstStreamedSectionBuildPromise;
         }
 
         /**
@@ -13197,11 +10400,6 @@
          *         rotation (Array<number>):   Rotation of the scene represented as a quaternion, defaults to [0, 0, 0, 1]
          *
          *         scale (Array<number>):      Scene's scale, defaults to [1, 1, 1]
-         *
-         *         headers:                    Optional HTTP headers to be sent along with splat requests
-         *
-         *         format (SceneFormat)        Optional, the format of the scene data (.ply, .ksplat, .splat). If not present, the
-         *                                     file extension in 'path' will be used to determine the format (if it is present)
          * }
          * @param {boolean} showLoadingUI Display a loading spinner while the scene is loading, defaults to true
          * @param {function} onProgress Function to be called as file data are received
@@ -13219,67 +10417,66 @@
 
             const fileCount = sceneOptions.length;
             const percentComplete = [];
-
-            let loadingUITaskId;
             if (showLoadingUI) {
                 this.loadingSpinner.removeAllTasks();
-                loadingUITaskId = this.loadingSpinner.addTask('Downloading...');
+                this.loadingSpinner.show();
             }
-
-            const onLoadProgress = (fileIndex, percent, percentLabel, loaderStatus) => {
+            const onLoadProgress = (fileIndex, percent, percentLabel) => {
                 percentComplete[fileIndex] = percent;
                 let totalPercent = 0;
                 for (let i = 0; i < fileCount; i++) totalPercent += percentComplete[i] || 0;
                 totalPercent = totalPercent / fileCount;
                 percentLabel = `${totalPercent.toFixed(2)}%`;
                 if (showLoadingUI) {
-                    if (loaderStatus === LoaderStatus.Downloading) {
-                        this.loadingSpinner.setMessageForTask(loadingUITaskId, totalPercent == 100 ?
-                                                              `Download complete!` : `Downloading: ${percentLabel}`);
-                    }
+                    this.loadingSpinner.setMessage(totalPercent == 100 ? `Download complete!` : `Downloading: ${percentLabel}`);
                 }
-                if (onProgress) onProgress(totalPercent, percentLabel, loaderStatus);
+                if (onProgress) onProgress(totalPercent, percentLabel, LoaderStatus.Downloading);
             };
 
-            const baseDownloadPromises = [];
-            const nativeDownloadPromises = [];
+            const downloadPromises = [];
+            const nativeLoadPromises = [];
+            const abortHandlers = [];
             for (let i = 0; i < sceneOptions.length; i++) {
                 const options = sceneOptions[i];
                 const format = (options.format !== undefined && options.format !== null) ? options.format : sceneFormatFromPath(options.path);
-                const baseDownloadPromise = this.downloadSplatSceneToSplatBuffer(options.path, options.splatAlphaRemovalThreshold,
-                                                                                 onLoadProgress.bind(this, i), false, undefined,
-                                                                                 format, options.headers);
-                baseDownloadPromises.push(baseDownloadPromise);
-                nativeDownloadPromises.push(baseDownloadPromise.promise);
+                const downloadPromise = this.downloadSplatSceneToSplatBuffer(options.path, options.splatAlphaRemovalThreshold,
+                                                                             onLoadProgress.bind(this, i), false, undefined, format);
+                abortHandlers.push(downloadPromise.abortHandler);
+                downloadPromises.push(downloadPromise);
+                nativeLoadPromises.push(downloadPromise.promise);
+                this.addSplatSceneDownloadPromise(downloadPromise);
             }
 
-            const downloadAndBuildPromise = new AbortablePromise((resolve, reject) => {
-                Promise.all(nativeDownloadPromises)
+            const downloadPromise = new AbortablePromise((resolve, reject) => {
+                Promise.all(nativeLoadPromises)
                 .then((splatBuffers) => {
-                    if (showLoadingUI) this.loadingSpinner.removeTask(loadingUITaskId);
-                    if (onProgress) onProgress(0, '0%', LoaderStatus.Processing);
-                    this.addSplatBuffers(splatBuffers, sceneOptions, true, showLoadingUI, showLoadingUI, false, false).then(() => {
+                    if (showLoadingUI) this.loadingSpinner.hide();
+                    if (onProgress) options.onProgress(0, '0%', LoaderStatus.Processing);
+                    this.addSplatBuffers(splatBuffers, sceneOptions, true, showLoadingUI, showLoadingUI).then(() => {
                         if (onProgress) onProgress(100, '100%', LoaderStatus.Processing);
                         this.clearSplatSceneDownloadAndBuildPromise();
                         resolve();
                     });
                 })
                 .catch((e) => {
-                    if (showLoadingUI) this.loadingSpinner.removeTask(loadingUITaskId);
+                    if (showLoadingUI) this.loadingSpinner.hide();
                     this.clearSplatSceneDownloadAndBuildPromise();
-                    reject(this.updateError(e, `Viewer::addSplatScenes -> Could not load one or more splat scenes.`));
+                    if (!(e instanceof AbortedPromiseError)) {
+                        reject(new Error(`Viewer::addSplatScenes -> Could not load one or more splat scenes.`));
+                    } else {
+                        resolve();
+                    }
                 })
                 .finally(() => {
-                    this.removeSplatSceneDownloadPromise(downloadAndBuildPromise);
+                    for (let downloadPromise of downloadPromises) {
+                        this.removeSplatSceneDownloadPromise(downloadPromise);
+                    }
                 });
-            }, (reason) => {
-                for (let baseDownloadPromise of baseDownloadPromises) {
-                    baseDownloadPromise.abort(reason);
-                }
+            }, () => {
+                for (let abortHandler of abortHandlers) abortHandler();
             });
-            this.addSplatSceneDownloadPromise(downloadAndBuildPromise);
-            this.setSplatSceneDownloadAndBuildPromise(downloadAndBuildPromise);
-            return downloadAndBuildPromise;
+            this.setSplatSceneDownloadAndBuildPromise(downloadPromise);
+            return downloadPromise;
         }
 
         /**
@@ -13289,38 +10486,25 @@
          *                                            value (valid range: 0 - 255), defaults to 1
          *
          * @param {function} onProgress Function to be called as file data are received
-         * @param {boolean} progressiveBuild Construct file sections into splat buffers as they are downloaded
+         * @param {boolean} streamBuiltSections Construct file sections into splat buffers as they are downloaded
          * @param {function} onSectionBuilt Function to be called when new section is added to the file
          * @param {string} format File format of the scene
-         * @param {object} headers Optional HTTP headers to pass to use for downloading splat scene
          * @return {AbortablePromise}
          */
         downloadSplatSceneToSplatBuffer(path, splatAlphaRemovalThreshold = 1, onProgress = undefined,
-                                        progressiveBuild = false, onSectionBuilt = undefined, format, headers) {
-            try {
-                if (format === SceneFormat.Splat || format === SceneFormat.KSplat || format === SceneFormat.Ply) {
-                    const optimizeSplatData = progressiveBuild ? false : this.optimizeSplatData;
-                    if (format === SceneFormat.Splat) {
-                        return SplatLoader.loadFromURL(path, onProgress, progressiveBuild, onSectionBuilt, splatAlphaRemovalThreshold,
-                                                       this.inMemoryCompressionLevel, optimizeSplatData, headers);
-                    } else if (format === SceneFormat.KSplat) {
-                        return KSplatLoader.loadFromURL(path, onProgress, progressiveBuild, onSectionBuilt, headers);
-                    } else if (format === SceneFormat.Ply) {
-                        return PlyLoader.loadFromURL(path, onProgress, progressiveBuild, onSectionBuilt, splatAlphaRemovalThreshold,
-                                                     this.inMemoryCompressionLevel, optimizeSplatData, this.sphericalHarmonicsDegree, headers);
-                    }
-                } else if (format === SceneFormat.Spz) {
-                    return SpzLoader.loadFromURL(path, onProgress, splatAlphaRemovalThreshold, this.inMemoryCompressionLevel,
-                                                 this.optimizeSplatData, this.sphericalHarmonicsDegree, headers);
-                }
-            } catch (e) {
-                throw this.updateError(e, null);
+                                        streamBuiltSections = false, onSectionBuilt = undefined, format) {
+            if (format === SceneFormat.Splat) {
+                return SplatLoader.loadFromURL(path, onProgress, streamBuiltSections, onSectionBuilt, splatAlphaRemovalThreshold, 0, false);
+            } else if (format === SceneFormat.KSplat) {
+                return KSplatLoader.loadFromURL(path, onProgress, streamBuiltSections, onSectionBuilt);
+            } else if (format === SceneFormat.Ply) {
+                return PlyLoader.loadFromURL(path, onProgress, streamBuiltSections, onSectionBuilt,
+                                             splatAlphaRemovalThreshold, 0, this.sphericalHarmonicsDegree);
             }
-
-            throw new Error(`Viewer::downloadSplatSceneToSplatBuffer -> File format not supported: ${path}`);
+            return AbortablePromise.reject(new Error(`Viewer::downloadSplatSceneToSplatBuffer -> File format not supported: ${path}`));
         }
 
-        static isProgressivelyLoadable(format) {
+        static isStreamable(format) {
             return format === SceneFormat.Splat || format === SceneFormat.KSplat || format === SceneFormat.Ply;
         }
 
@@ -13330,21 +10514,40 @@
          */
         addSplatBuffers = function() {
 
-            return function(splatBuffers, splatBufferOptions = [], finalBuild = true, showLoadingUI = true,
-                            showLoadingUIForSplatTreeBuild = true, replaceExisting = false,
-                            enableRenderBeforeFirstSort = false, preserveVisibleRegion = true) {
+            return function(splatBuffers, splatBufferOptions = [], finalBuild = true,
+                            showLoadingUI = true, showLoadingUIForSplatTreeBuild = true) {
 
                 if (this.isDisposingOrDisposed()) return Promise.resolve();
 
+                this.splatRenderReady = false;
                 let splatProcessingTaskId = null;
-                const removeSplatProcessingTask = () => {
+
+                const finish = (buildResults) => {
+                    if (this.isDisposingOrDisposed()) return;
+
                     if (splatProcessingTaskId !== null) {
                         this.loadingSpinner.removeTask(splatProcessingTaskId);
                         splatProcessingTaskId = null;
                     }
+
+                    // If we aren't calculating the splat distances from the center on the GPU, the sorting worker needs splat centers and
+                    // transform indexes so that it can calculate those distance values.
+                    if (!this.gpuAcceleratedSort && this.sortWorker) {
+                        this.sortWorker.postMessage({
+                            'centers': buildResults.centers.buffer,
+                            'transformIndexes': buildResults.sceneIndexes.buffer,
+                            'range': {
+                                'from': buildResults.from,
+                                'to': buildResults.to,
+                                'count': buildResults.count
+                            }
+                        });
+                    }
+
+                    this.splatRenderReady = true;
+                    this.sortNeededForSceneChange = true;
                 };
 
-                this.splatRenderReady = false;
                 return new Promise((resolve) => {
                     if (showLoadingUI) {
                         splatProcessingTaskId = this.loadingSpinner.addTask('Processing splats...');
@@ -13353,48 +10556,15 @@
                         if (this.isDisposingOrDisposed()) {
                             resolve();
                         } else {
-                            const buildResults = this.addSplatBuffersToMesh(splatBuffers, splatBufferOptions, finalBuild,
-                                                                            showLoadingUIForSplatTreeBuild, replaceExisting,
-                                                                            preserveVisibleRegion);
-
+                            const buildResults = this.addSplatBuffersToMesh(splatBuffers, splatBufferOptions,
+                                                                            finalBuild, showLoadingUIForSplatTreeBuild);
                             const maxSplatCount = this.splatMesh.getMaxSplatCount();
                             if (this.sortWorker && this.sortWorker.maxSplatCount !== maxSplatCount) this.disposeSortWorker();
-                            // If we aren't calculating the splat distances from the center on the GPU, the sorting worker needs
-                            // splat centers and transform indexes so that it can calculate those distance values.
-                            if (!this.gpuAcceleratedSort) {
-                                this.preSortMessages.push({
-                                    'centers': buildResults.centers.buffer,
-                                    'sceneIndexes': buildResults.sceneIndexes.buffer,
-                                    'range': {
-                                        'from': buildResults.from,
-                                        'to': buildResults.to,
-                                        'count': buildResults.count
-                                    }
-                                });
-                            }
                             const sortWorkerSetupPromise = (!this.sortWorker && maxSplatCount > 0) ?
                                                              this.setupSortWorker(this.splatMesh) : Promise.resolve();
                             sortWorkerSetupPromise.then(() => {
-                                if (this.isDisposingOrDisposed()) return;
-                                this.runSplatSort(true, true).then((sortRunning) => {
-                                    if (!this.sortWorker || !sortRunning) {
-                                        this.splatRenderReady = true;
-                                        removeSplatProcessingTask();
-                                        resolve();
-                                    } else {
-                                        if (enableRenderBeforeFirstSort) {
-                                            this.splatRenderReady = true;
-                                        } else {
-                                            this.runAfterNextSort.push(() => {
-                                                this.splatRenderReady = true;
-                                            });
-                                        }
-                                        this.runAfterNextSort.push(() => {
-                                            removeSplatProcessingTask();
-                                            resolve();
-                                        });
-                                    }
-                                });
+                                finish(buildResults);
+                                resolve();
                             });
                         }
                     }, true);
@@ -13404,9 +10574,8 @@
         }();
 
         /**
-         * Add one or more instances of SplatBuffer to the SplatMesh instance managed by the viewer. By default, this function is additive;
-         * all splat buffers contained by the viewer's splat mesh before calling this function will be preserved. This behavior can be
-         * changed by passing 'true' for 'replaceExisting'.
+         * Add one or more instances of SplatBuffer to the SplatMesh instance managed by the viewer. This function is additive; all splat
+         * buffers contained by the viewer's splat mesh before calling this function will be preserved.
          * @param {Array<SplatBuffer>} splatBuffers SplatBuffer instances
          * @param {Array<object>} splatBufferOptions Array of options objects: {
          *
@@ -13423,46 +10592,32 @@
          * @param {boolean} showLoadingUIForSplatTreeBuild Whether or not to show the loading spinner during construction of the splat tree.
          * @return {object} Object containing info about the splats that are updated
          */
-        addSplatBuffersToMesh = function() {
-
+        addSplatBuffersToMesh(splatBuffers, splatBufferOptions, finalBuild = true, showLoadingUIForSplatTreeBuild = false) {
+            if (this.isDisposingOrDisposed()) return;
+            const allSplatBuffers = this.splatMesh.splatBuffers || [];
+            const allSplatBufferOptions = this.splatMesh.splatBufferOptions || [];
+            allSplatBuffers.push(...splatBuffers);
+            allSplatBufferOptions.push(...splatBufferOptions);
+            if (this.renderer) this.splatMesh.setRenderer(this.renderer);
             let splatOptimizingTaskId;
-
-            return function(splatBuffers, splatBufferOptions, finalBuild = true, showLoadingUIForSplatTreeBuild = false,
-                            replaceExisting = false, preserveVisibleRegion = true) {
+            const onSplatTreeIndexesUpload = (finished) => {
                 if (this.isDisposingOrDisposed()) return;
-                let allSplatBuffers = [];
-                let allSplatBufferOptions = [];
-                if (!replaceExisting) {
-                    allSplatBuffers = this.splatMesh.scenes.map((scene) => scene.splatBuffer) || [];
-                    allSplatBufferOptions = this.splatMesh.sceneOptions ? this.splatMesh.sceneOptions.map((sceneOptions) => sceneOptions) : [];
+                const splatCount = this.splatMesh.getSplatCount();
+                if (showLoadingUIForSplatTreeBuild && splatCount >= MIN_SPLAT_COUNT_TO_SHOW_SPLAT_TREE_LOADING_SPINNER) {
+                    if (!finished && !splatOptimizingTaskId) {
+                        this.loadingSpinner.setMinimized(true, true);
+                        splatOptimizingTaskId = this.loadingSpinner.addTask('Optimizing splats...');
+                    }
                 }
-                allSplatBuffers.push(...splatBuffers);
-                allSplatBufferOptions.push(...splatBufferOptions);
-                if (this.renderer) this.splatMesh.setRenderer(this.renderer);
-                const onSplatTreeIndexesUpload = (finished) => {
-                    if (this.isDisposingOrDisposed()) return;
-                    const splatCount = this.splatMesh.getSplatCount();
-                    if (showLoadingUIForSplatTreeBuild && splatCount >= MIN_SPLAT_COUNT_TO_SHOW_SPLAT_TREE_LOADING_SPINNER) {
-                        if (!finished && !splatOptimizingTaskId) {
-                            this.loadingSpinner.setMinimized(true, true);
-                            splatOptimizingTaskId = this.loadingSpinner.addTask('Optimizing data structures...');
-                        }
-                    }
-                };
-                const onSplatTreeReady = (finished) => {
-                    if (this.isDisposingOrDisposed()) return;
-                    if (finished && splatOptimizingTaskId) {
-                        this.loadingSpinner.removeTask(splatOptimizingTaskId);
-                        splatOptimizingTaskId = null;
-                    }
-                };
-                const buildResults = this.splatMesh.build(allSplatBuffers, allSplatBufferOptions, true, finalBuild, onSplatTreeIndexesUpload,
-                                                          onSplatTreeReady, preserveVisibleRegion);
-                if (finalBuild && this.freeIntermediateSplatData) this.splatMesh.freeIntermediateSplatData();
-                return buildResults;
             };
-
-        }();
+            const onSplatTreeReady = (finished) => {
+                if (this.isDisposingOrDisposed()) return;
+                if (finished && splatOptimizingTaskId) {
+                    this.loadingSpinner.removeTask(splatOptimizingTaskId);
+                }
+            };
+            return this.splatMesh.build(allSplatBuffers, allSplatBufferOptions, true, finalBuild, onSplatTreeIndexesUpload, onSplatTreeReady);
+        }
 
         /**
          * Set up the splat sorting web worker.
@@ -13475,8 +10630,9 @@
                 const DistancesArrayType = this.integerBasedSort ? Int32Array : Float32Array;
                 const splatCount = splatMesh.getSplatCount();
                 const maxSplatCount = splatMesh.getMaxSplatCount();
-                this.sortWorker = createSortWorker(maxSplatCount, this.sharedMemoryForWorkers, this.enableSIMDInSort,
-                                                   this.integerBasedSort, this.splatMesh.dynamicMode, this.splatSortDistanceMapPrecision);
+                this.sortWorker = createSortWorker(maxSplatCount, this.sharedMemoryForWorkers,
+                                                   this.integerBasedSort, this.splatMesh.dynamicMode);
+                let sortCount = 0;
                 this.sortWorker.onmessage = (e) => {
                     if (e.data.sortDone) {
                         this.sortRunning = false;
@@ -13486,19 +10642,17 @@
                             const sortedIndexes = new Uint32Array(e.data.sortedIndexes.buffer, 0, e.data.splatRenderCount);
                             this.splatMesh.updateRenderIndexes(sortedIndexes, e.data.splatRenderCount);
                         }
-
-                        this.lastSplatSortCount = this.splatSortCount;
-
                         this.lastSortTime = e.data.sortTime;
                         this.sortPromiseResolver();
                         this.sortPromiseResolver = null;
                         this.forceRenderNextFrame();
-                        if (this.runAfterNextSort.length > 0) {
-                            this.runAfterNextSort.forEach((func) => {
+                        if (sortCount === 0) {
+                            this.runAfterFirstSort.forEach((func) => {
                                 func();
                             });
-                            this.runAfterNextSort.length = 0;
+                            this.runAfterFirstSort.length = 0;
                         }
+                        sortCount++;
                     } else if (e.data.sortCanceled) {
                         this.sortRunning = false;
                     } else if (e.data.sortSetupPhase1Complete) {
@@ -13536,14 +10690,6 @@
             });
         }
 
-        updateError(error, defaultMessage) {
-            if (error instanceof AbortedPromiseError) return error;
-            if (error instanceof DirectLoadError) {
-                return new Error('File type or server does not support progressive loading.');
-            }
-            return defaultMessage ? new Error(defaultMessage) : error;
-        }
-
         disposeSortWorker() {
             if (this.sortWorker) this.sortWorker.terminate();
             this.sortWorker = null;
@@ -13552,15 +10698,10 @@
                 this.sortPromiseResolver();
                 this.sortPromiseResolver = null;
             }
-            this.preSortMessages = [];
             this.sortRunning = false;
         }
 
-        removeSplatScene(indexToRemove, showLoadingUI = true) {
-            return this.removeSplatScenes([indexToRemove], showLoadingUI);
-        }
-
-        removeSplatScenes(indexesToRemove, showLoadingUI = true) {
+        removeSplatScene(index, showLoadingUI = true) {
             if (this.isLoadingOrUnloading()) {
                 throw new Error('Cannot remove splat scene while another load or unload is already in progress.');
             }
@@ -13608,15 +10749,9 @@
                     const savedSplatBuffers = [];
                     const savedSceneOptions = [];
                     const savedSceneTransformComponents = [];
+                    const savedVisibleRegionFadeStartRadius = this.splatMesh.visibleRegionFadeStartRadius;
                     for (let i = 0; i < this.splatMesh.scenes.length; i++) {
-                        let shouldRemove = false;
-                        for (let indexToRemove of indexesToRemove) {
-                            if (indexToRemove === i) {
-                                shouldRemove = true;
-                                break;
-                            }
-                        }
-                        if (!shouldRemove) {
+                        if (i !== index) {
                             const scene = this.splatMesh.scenes[i];
                             savedSplatBuffers.push(scene.splatBuffer);
                             savedSceneOptions.push(this.splatMesh.sceneOptions[i]);
@@ -13629,12 +10764,12 @@
                     }
                     this.disposeSortWorker();
                     this.splatMesh.dispose();
-                    this.sceneRevealMode = SceneRevealMode.Instant;
                     this.createSplatMesh();
                     this.addSplatBuffers(savedSplatBuffers, savedSceneOptions, true, false, true)
                     .then(() => {
                         if (checkForEarlyExit()) return;
                         checkAndHideLoadingUI();
+                        this.splatMesh.visibleRegionFadeStartRadius = savedVisibleRegionFadeStartRadius;
                         this.splatMesh.scenes.forEach((scene, index) => {
                             scene.position.copy(savedSceneTransformComponents[index].position);
                             scene.quaternion.copy(savedSceneTransformComponents[index].quaternion);
@@ -13642,8 +10777,7 @@
                         });
                         this.splatMesh.updateTransforms();
                         this.splatRenderReady = false;
-
-                        this.runSplatSort(true)
+                        this.updateSplatSort(true)
                         .then(() => {
                             if (checkForEarlyExit()) {
                                 this.splatRenderReady = true;
@@ -13686,9 +10820,7 @@
          */
         stop() {
             if (this.selfDrivenMode && this.selfDrivenModeRunning) {
-                if (this.webXRMode) {
-                    this.renderer.setAnimationLoop(null);
-                } else {
+                if (!this.webXRMode) {
                     cancelAnimationFrame(this.requestFrameId);
                 }
                 this.selfDrivenModeRunning = false;
@@ -13699,8 +10831,7 @@
          * Dispose of all resources held directly and indirectly by this viewer.
          */
         async dispose() {
-            if (this.isDisposingOrDisposed()) return this.disposePromise;
-
+            this.disposing = true;
             let waitPromises = [];
             let promisesToAbort = [];
             for (let promiseKey in this.splatSceneDownloadPromises) {
@@ -13713,19 +10844,12 @@
             if (this.sortPromise) {
                 waitPromises.push(this.sortPromise);
             }
-
-            this.disposing = true;
-            this.disposePromise = Promise.all(waitPromises).finally(() => {
+            const disposePromise = Promise.all(waitPromises).finally(() => {
                 this.stop();
-                if (this.orthographicControls) {
-                    this.orthographicControls.dispose();
-                    this.orthographicControls = null;
+                if (this.controls) {
+                    this.controls.dispose();
+                    this.controls = null;
                 }
-                if (this.perspectiveControls) {
-                    this.perspectiveControls.dispose();
-                    this.perspectiveControls = null;
-                }
-                this.controls = null;
                 if (this.splatMesh) {
                     this.splatMesh.dispose();
                     this.splatMesh = null;
@@ -13769,12 +10893,11 @@
                 this.sortWorkerTransforms = null;
                 this.disposed = true;
                 this.disposing = false;
-                this.disposePromise = null;
             });
             promisesToAbort.forEach((toAbort) => {
-                toAbort.abort('Scene disposed');
+                toAbort.abort();
             });
-            return this.disposePromise;
+            return disposePromise;
         }
 
         selfDrivenUpdate() {
@@ -13803,8 +10926,6 @@
             const changeEpsilon = 0.0001;
 
             return function() {
-                if (!this.initialized || !this.splatRenderReady || this.isDisposingOrDisposed()) return false;
-
                 let shouldRender = false;
                 let cameraChanged = false;
                 if (this.camera) {
@@ -13836,7 +10957,7 @@
         render = function() {
 
             return function() {
-                if (!this.initialized || !this.splatRenderReady || this.isDisposingOrDisposed()) return;
+                if (!this.initialized || !this.splatRenderReady) return;
 
                 const hasRenderables = (threeScene) => {
                     for (let child of threeScene.children) {
@@ -13861,16 +10982,15 @@
 
         update(renderer, camera) {
             if (this.dropInMode) this.updateForDropInMode(renderer, camera);
-
-            if (!this.initialized || !this.splatRenderReady || this.isDisposingOrDisposed()) return;
-
+            if (!this.initialized || !this.splatRenderReady) return;
             if (this.controls) {
                 this.controls.update();
                 if (this.camera.isOrthographicCamera && !this.usingExternalCamera) {
                     Viewer.setCameraPositionFromZoom(this.camera, this.camera, this.controls);
                 }
             }
-            this.runSplatSort();
+            this.splatMesh.updateVisibleRegionFadeDistance(this.sceneRevealMode);
+            this.updateSplatSort();
             this.updateForRendererSizeChanges();
             this.updateSplatMesh();
             this.updateMeshCursor();
@@ -14067,7 +11187,7 @@
             }
         }
 
-        runSplatSort = function() {
+        updateSplatSort = function() {
 
             const mvpMatrix = new THREE__namespace.Matrix4();
             const cameraPositionArray = [];
@@ -14092,13 +11212,9 @@
                 }
             ];
 
-            return function(force = false, forceSortAll = false) {
-                if (!this.initialized) return Promise.resolve(false);
-                if (this.sortRunning) return Promise.resolve(true);
-                if (this.splatMesh.getSplatCount() <= 0) {
-                    this.splatRenderCount = 0;
-                    return Promise.resolve(false);
-                }
+            return async function(force = false) {
+                if (this.sortRunning) return;
+                if (this.splatMesh.getSplatCount() <= 0) return;
 
                 let angleDiff = 0;
                 let positionDiff = 0;
@@ -14110,92 +11226,79 @@
                 positionDiff = sortViewOffset.copy(this.camera.position).sub(lastSortViewPos).length();
 
                 if (!force) {
-                    if (!this.splatMesh.dynamicMode && queuedSorts.length === 0) {
+                    if (!this.sortNeededForSceneChange && !this.splatMesh.dynamicMode && queuedSorts.length === 0) {
                         if (angleDiff <= 0.99) needsRefreshForRotation = true;
                         if (positionDiff >= 1.0) needsRefreshForPosition = true;
-                        if (!needsRefreshForRotation && !needsRefreshForPosition) return Promise.resolve(false);
+                        if (!needsRefreshForRotation && !needsRefreshForPosition) return;
                     }
                 }
 
                 this.sortRunning = true;
-                let { splatRenderCount, shouldSortAll } = this.gatherSceneNodesForSort();
-                shouldSortAll = shouldSortAll || forceSortAll;
+                const { splatRenderCount, shouldSortAll } = this.gatherSceneNodesForSort();
                 this.splatRenderCount = splatRenderCount;
 
                 mvpMatrix.copy(this.camera.matrixWorld).invert();
                 const mvpCamera = this.perspectiveCamera || this.camera;
                 mvpMatrix.premultiply(mvpCamera.projectionMatrix);
-                if (!this.splatMesh.dynamicMode) mvpMatrix.multiply(this.splatMesh.matrixWorld);
+                mvpMatrix.multiply(this.splatMesh.matrixWorld);
 
-                let gpuAcceleratedSortPromise = Promise.resolve(true);
                 if (this.gpuAcceleratedSort && (queuedSorts.length <= 1 || queuedSorts.length % 2 === 0)) {
-                    gpuAcceleratedSortPromise = this.splatMesh.computeDistancesOnGPU(mvpMatrix, this.sortWorkerPrecomputedDistances);
+                    await this.splatMesh.computeDistancesOnGPU(mvpMatrix, this.sortWorkerPrecomputedDistances);
                 }
 
-                gpuAcceleratedSortPromise.then(() => {
+                if (this.splatMesh.dynamicMode || shouldSortAll) {
+                    queuedSorts.push(this.splatRenderCount);
+                } else {
                     if (queuedSorts.length === 0) {
-                        if (this.splatMesh.dynamicMode || shouldSortAll) {
-                            queuedSorts.push(this.splatRenderCount);
-                        } else {
-                                for (let partialSort of partialSorts) {
-                                if (angleDiff < partialSort.angleThreshold) {
-                                    for (let sortFraction of partialSort.sortFractions) {
-                                        queuedSorts.push(Math.floor(this.splatRenderCount * sortFraction));
-                                    }
-                                    break;
+                        for (let partialSort of partialSorts) {
+                            if (angleDiff < partialSort.angleThreshold) {
+                                for (let sortFraction of partialSort.sortFractions) {
+                                    queuedSorts.push(Math.floor(this.splatRenderCount * sortFraction));
                                 }
+                                break;
                             }
-                            queuedSorts.push(this.splatRenderCount);
                         }
+                        queuedSorts.push(this.splatRenderCount);
                     }
-                    let sortCount = Math.min(queuedSorts.shift(), this.splatRenderCount);
-                    this.splatSortCount = sortCount;
+                }
+                let sortCount = Math.min(queuedSorts.shift(), this.splatRenderCount);
 
-                    cameraPositionArray[0] = this.camera.position.x;
-                    cameraPositionArray[1] = this.camera.position.y;
-                    cameraPositionArray[2] = this.camera.position.z;
+                cameraPositionArray[0] = this.camera.position.x;
+                cameraPositionArray[1] = this.camera.position.y;
+                cameraPositionArray[2] = this.camera.position.z;
 
-                    const sortMessage = {
-                        'modelViewProj': mvpMatrix.elements,
-                        'cameraPosition': cameraPositionArray,
-                        'splatRenderCount': this.splatRenderCount,
-                        'splatSortCount': sortCount,
-                        'usePrecomputedDistances': this.gpuAcceleratedSort
-                    };
-                    if (this.splatMesh.dynamicMode) {
-                        this.splatMesh.fillTransformsArray(this.sortWorkerTransforms);
+                const sortMessage = {
+                    'modelViewProj': mvpMatrix.elements,
+                    'cameraPosition': cameraPositionArray,
+                    'splatRenderCount': this.splatRenderCount,
+                    'splatSortCount': sortCount,
+                    'usePrecomputedDistances': this.gpuAcceleratedSort
+                };
+                if (this.splatMesh.dynamicMode) {
+                    this.splatMesh.fillTransformsArray(this.sortWorkerTransforms);
+                }
+                if (!this.sharedMemoryForWorkers) {
+                    sortMessage.indexesToSort = this.sortWorkerIndexesToSort;
+                    sortMessage.transforms = this.sortWorkerTransforms;
+                    if (this.gpuAcceleratedSort) {
+                        sortMessage.precomputedDistances = this.sortWorkerPrecomputedDistances;
                     }
-                    if (!this.sharedMemoryForWorkers) {
-                        sortMessage.indexesToSort = this.sortWorkerIndexesToSort;
-                        sortMessage.transforms = this.sortWorkerTransforms;
-                        if (this.gpuAcceleratedSort) {
-                            sortMessage.precomputedDistances = this.sortWorkerPrecomputedDistances;
-                        }
-                    }
+                }
 
-                    this.sortPromise = new Promise((resolve) => {
-                        this.sortPromiseResolver = resolve;
-                    });
-
-                    if (this.preSortMessages.length > 0) {
-                        this.preSortMessages.forEach((message) => {
-                            this.sortWorker.postMessage(message);
-                        });
-                        this.preSortMessages = [];
-                    }
-                    this.sortWorker.postMessage({
-                        'sort': sortMessage
-                    });
-
-                    if (queuedSorts.length === 0) {
-                        lastSortViewPos.copy(this.camera.position);
-                        lastSortViewDir.copy(sortViewDir);
-                    }
-
-                    return true;
+                this.sortPromise = new Promise((resolve) => {
+                    this.sortPromiseResolver = resolve;
                 });
 
-                return gpuAcceleratedSortPromise;
+                this.sortWorker.postMessage({
+                    'sort': sortMessage
+                });
+
+                if (queuedSorts.length === 0) {
+                    lastSortViewPos.copy(this.camera.position);
+                    lastSortViewDir.copy(sortViewDir);
+                }
+
+                this.sortNeededForSceneChange = false;
             };
 
         }();
@@ -14234,7 +11337,7 @@
 
                 if (splatTree) {
                     baseModelView.copy(this.camera.matrixWorld).invert();
-                    if (!this.splatMesh.dynamicMode) baseModelView.multiply(this.splatMesh.matrixWorld);
+                    baseModelView.multiply(this.splatMesh.matrixWorld);
 
                     let nodeRenderCount = 0;
                     let splatRenderCount = 0;
@@ -14326,10 +11429,6 @@
             return this.splatMesh.getScene(sceneIndex);
         }
 
-        getSceneCount() {
-            return this.splatMesh.getSceneCount();
-        }
-
         isMobile() {
             return navigator.userAgent.includes('Mobi');
         }
@@ -14347,32 +11446,18 @@
             options.selfDrivenMode = false;
             options.useBuiltInControls = false;
             options.rootElement = null;
+            options.ignoreDevicePixelRatio = false;
             options.dropInMode = true;
             options.camera = undefined;
             options.renderer = undefined;
 
             this.viewer = new Viewer(options);
             this.splatMesh = null;
-            this.updateSplatMesh();
 
             this.callbackMesh = DropInViewer.createCallbackMesh();
             this.add(this.callbackMesh);
             this.callbackMesh.onBeforeRender = DropInViewer.onBeforeRender.bind(this, this.viewer);
 
-            this.viewer.onSplatMeshChanged(() => {
-                this.updateSplatMesh();
-            });
-
-        }
-
-        updateSplatMesh() {
-            if (this.splatMesh !== this.viewer.splatMesh) {
-                if (this.splatMesh) {
-                    this.remove(this.splatMesh);
-                }
-                this.splatMesh = this.viewer.splatMesh;
-                this.add(this.viewer.splatMesh);
-            }
         }
 
         /**
@@ -14433,27 +11518,22 @@
             return this.viewer.getSplatScene(sceneIndex);
         }
 
-        removeSplatScene(index, showLoadingUI = true) {
-            return this.viewer.removeSplatScene(index, showLoadingUI);
+        removeSplatScene(index) {
+            return this.viewer.removeSplatScene(index);
         }
 
-        removeSplatScenes(indexes, showLoadingUI = true) {
-            return this.viewer.removeSplatScenes(indexes, showLoadingUI);
-        }
-
-        getSceneCount() {
-            return this.viewer.getSceneCount();
-        }
-
-        setActiveSphericalHarmonicsDegrees(activeSphericalHarmonicsDegrees) {
-            this.viewer.setActiveSphericalHarmonicsDegrees(activeSphericalHarmonicsDegrees);
-        }
-
-        async dispose() {
-            return await this.viewer.dispose();
+        dispose() {
+            return this.viewer.dispose();
         }
 
         static onBeforeRender(viewer, renderer, threeScene, camera) {
+            if (this.splatMesh !== this.viewer.splatMesh) {
+                if (this.splatMesh) {
+                    this.remove(this.splatMesh);
+                }
+                this.splatMesh = this.viewer.splatMesh;
+                this.add(this.viewer.splatMesh);
+            }
             viewer.update(renderer, camera);
         }
 
@@ -14470,12 +11550,12 @@
     }
 
     exports.AbortablePromise = AbortablePromise;
+    exports.CompressedPlyParser = CompressedPlyParser;
     exports.DropInViewer = DropInViewer;
     exports.KSplatLoader = KSplatLoader;
     exports.LoaderUtils = Utils;
     exports.LogLevel = LogLevel;
     exports.OrbitControls = OrbitControls;
-    exports.PlayCanvasCompressedPlyParser = PlayCanvasCompressedPlyParser;
     exports.PlyLoader = PlyLoader;
     exports.PlyParser = PlyParser;
     exports.RenderMode = RenderMode;
@@ -14486,8 +11566,6 @@
     exports.SplatLoader = SplatLoader;
     exports.SplatParser = SplatParser;
     exports.SplatPartitioner = SplatPartitioner;
-    exports.SplatRenderMode = SplatRenderMode;
-    exports.SpzLoader = SpzLoader;
     exports.Viewer = Viewer;
     exports.WebXRMode = WebXRMode;
 
